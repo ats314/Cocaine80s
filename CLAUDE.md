@@ -147,9 +147,9 @@ Tabs within `game`: market, bag, travel, bank, empire, life
 
 6. **dealsSinceLastEvent**: This counter gates NPC storylets. It increments on buy/sell and resets when a storylet fires. If you add a new storylet, it uses this automatically via the condition system.
 
-## Unimplemented Features
+## Recently Completed Features
 
-1. **Witness defuse encounter** — Fuse plants on big deals, but the $2K defuse opportunity is not wired to the encounter system
+1. **Witness defuse encounter** — When a witness fuse is active, a $2K defuse opportunity appears as a random encounter (40% chance per travel)
 
 ## Testing
 

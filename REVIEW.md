@@ -61,8 +61,8 @@ The following bugs from the original review have been verified as **already fixe
 ### 1. Supplier betrayal flag races with random roll
 Flag is set unconditionally when `supplierFlipped` is true, but the flip itself is behind `Math.random() < 0.3`. When the conditions are met but the random check fails (70% of the time), the flag is NOT set, so the check retries on subsequent travels. This is technically correct but could be surprising — the player may get betrayed later when they've forgotten about the original risk.
 
-### 2. Witness defuse mechanic not wired
-The witness fuse plants correctly and detonates after 8 moves, but the comment describes a $2K defuse opportunity that is never exposed through the encounter system. Players have no way to defuse the witness fuse.
+### ~~2. Witness defuse mechanic not wired~~
+**Status: Fixed.** The witness defuse encounter now appears as a random encounter (40% chance per travel while fuse is active). Players can pay $2K to silence the witness.
 
 ---
 

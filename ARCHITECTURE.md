@@ -1,114 +1,102 @@
 # Architecture Reference
 
-Complete code map of `cocaine80master` (~3,630 lines). All line numbers are approximate and may shift with edits.
+Complete code map of `cocaine80master` (~3,200 lines). All line numbers are approximate and may shift with edits.
 
 ## File Layout
 
 ```
 Lines 1-14        Imports, header comments
-Lines 16-21       C (color palette constant)
-Lines 24-31       LOCS (6 locations)
-Lines 35-48       LOCATION_VIBE (day/night atmosphere text per location)
-Lines 51-61       DRUGS (8 drugs with price parameters)
+Lines 15-22       C (color palette constant)
+Lines 23-31       LOCS (6 locations)
+Lines 33-48       LOCATION_VIBE (day/night atmosphere text per location)
+Lines 50-61       DRUGS (8 drugs with price parameters)
 Lines 63-70       RADIO_EVENTS (6 price-shock events)
 Lines 72-83       PAGER_DEALS (10 timed bonus contracts)
 Lines 85-108      ERAS (5 game phases) + PHASE_TRANSITIONS
 Lines 110-136     LIFESTYLE (8 items), SAFE_HOUSES (4 tiers), TURF_LEVELS (5 levels)
-Lines 138-139     RIVALS_NAMES, MAX_MOVES
-Lines 145-195     PLAYBOOKS (8 character classes)
-Lines 201-222     SAFEHOUSE_UPGRADES (10 meta-progression upgrades)
-Lines 228-269     DAILY_MODIFIERS (10), getDailySeed, getDailyModifiers, SeededRNG
-Lines 272-280     COACH_MARKS (7 contextual hints)
-Lines 282-305     COMIC_PANELS (5), NEWSPAPERS (15)
-Lines 307-463     NARRATIVE ENGINE — openers, beats, generateNarrative()
-Lines 465-479     ENCOUNTERS (random events)
-Lines 482-486     HELPERS — R, RF, FM, CL, randNorm
-Lines 488-508     PRICE ENGINE — initBasePrices, initMomentum, evolveBasePrices, evolveMomentum, getStreetPrices
-Lines 511-518     calcTxRisk, calcLegalFees, getEra
-Lines 522-532     getSkyGradient (visual background based on time/heat)
-Lines 534-549     NPCS, HEAT_LADDER (7 difficulty levels)
+Lines 138         RIVALS_NAMES
+Lines 141-150     COACH_MARKS (7 contextual hints)
+Lines 152-175     COMIC_PANELS (5), NEWSPAPERS (15)
+Lines 177-333     NARRATIVE ENGINE — openers, beats, generateNarrative()
+Lines 335-349     ENCOUNTERS (random events, including witness defuse)
+Lines 352-356     HELPERS — R, RF, FM, CL, randNorm
+Lines 359-380     PRICE ENGINE — initBasePrices, initMomentum, evolveBasePrices, evolveMomentum, getStreetPrices
+Lines 382-391     calcTxRisk, calcLegalFees, getEra
+Lines 393-403     getSkyGradient (visual background based on time/heat)
+Lines 405-410     NPCS
 
-Lines 552-994     ═══ STORYLET SYSTEM ═══
-Lines 558-573     Maria storylets (maria_intro → maria_react_crack)
-Lines 647-709     Ramirez storylets (ramirez_intro → ramirez_bribe)
-Lines 715-765     Colombiano storylets (colombiano_intro → colombiano_zoo)
-Lines 771-877     Gameplay-triggered storylets (milestones, flavor)
-Lines 882-931     Faction dispute chain (Medellín/Cali/Independent)
-Lines 936-993     Informant arc chain
+Lines 412-854     ═══ STORYLET SYSTEM ═══
+Lines 419-503     Maria storylets (maria_intro → maria_react_crack)
+Lines 504-571     Ramirez storylets (ramirez_intro → ramirez_bribe)
+Lines 572-627     Colombiano storylets (colombiano_intro → colombiano_zoo)
+Lines 628-738     Gameplay-triggered storylets (milestones, flavor)
+Lines 739-792     Faction dispute chain (Medellín/Cali/Independent)
+Lines 793-854     Informant arc chain
 
-Lines 995-1006    NPC_COLORS, NPC_NAMES, computeQualities
-Lines 1008-1062   meetsConditions, selectStorylet (priority queue)
-Lines 1064-1077   applyChoiceEffects
+Lines 855-858     NPC_COLORS, NPC_NAMES
+Lines 859-868     computeQualities
+Lines 869-910     meetsConditions
+Lines 911-924     selectStorylet (priority queue)
+Lines 925-938     applyChoiceEffects
 
-Lines 1078-1104   ═══ META-PROGRESSION ═══
-Lines 1081-1090   DEFAULT_META shape
-Lines 1092-1104   loadMeta, saveMeta (localStorage)
-Lines 1107-1135   calcRepEarned
-Lines 1137-1186   applySafehouseUpgrades
-Lines 1188-1217   applyPlaybookMods
-Lines 1220-1255   applyDailyMods
-Lines 1258-1312   createInitialState (state factory)
+Lines 940-982     createInitialState (state factory, no parameters)
 
-Lines 1314-2129   ═══ PURE STATE TRANSITIONS ═══
-Lines 1318-1818   processTravel (the big one — ~500 lines)
-Lines 1820-1863   processBuyDrug
-Lines 1865-1960   processSellDrug
-Lines 1962-1984   processPolice
-Lines 1986-2003   processBuyTurf
-Lines 2005-2012   processHireEnforcers
-Lines 2014-2045   processTurfWar
-Lines 2047-2077   processEncounter
-Lines 2079-2094   processBank
-Lines 2096-2113   processBuyLifestyle
-Lines 2115-2123   processBuySafeHouse
-Lines 2125-2128   processBuyGun
+Lines 984-1770    ═══ PURE STATE TRANSITIONS ═══
+Lines 988-1463    processTravel (the big one — ~475 lines)
+Lines 1465-1503   processBuyDrug
+Lines 1505-1597   processSellDrug
+Lines 1599-1621   processPolice
+Lines 1623-1640   processBuyTurf
+Lines 1642-1649   processHireEnforcers
+Lines 1651-1682   processTurfWar
+Lines 1684-1719   processEncounter
+Lines 1721-1736   processBank
+Lines 1738-1754   processBuyLifestyle
+Lines 1756-1764   processBuySafeHouse
+Lines 1766-1770   processBuyGun
 
-Lines 2130-2249   ═══ AUDIO ENGINE ═══
-Lines 2133-2137   getCtx, startAudio, playTone, playChord
-Lines 2139-2151   SFX (10 sound effects)
-Lines 2154-2160   SYNTH_SCALES (per-era music parameters)
-Lines 2162-2247   SynthEngine class (arpeggio, bass, pads, hihat)
+Lines 1771-1888   ═══ AUDIO ENGINE ═══
+Lines 1775-1793   getCtx, startAudio, playTone, playChord
+Lines 1795-1801   SYNTH_SCALES (per-era music parameters), SFX
+Lines 1803-1888   SynthEngine class (arpeggio, bass, pads, hihat)
 
-Lines 2251-2261   ═══ STYLES ═══
-Lines 2254-2258   ft, ftBody, bx, bt, inp (style factories)
-Lines 2259       UNLOCK_MAP (achievement → feature unlock)
-Lines 2261       CSS (all keyframe animations)
+Lines 1890-1900   ═══ STYLES ═══
+Lines 1893-1898   ft, ftBody, bx, bt, inp (style factories)
+Lines 1899        UNLOCK_MAP (achievement → feature unlock)
+Lines 1900        CSS (all keyframe animations)
 
-Lines 2263-2539   ═══ UI COMPONENTS ═══
-Lines 2265-2272   WeatherOverlay
-Lines 2275-2289   AmbientMotes
-Lines 2291-2302   Particles
-Lines 2304-2309   Neon
-Lines 2311-2321   TravelAnim
-Lines 2323-2371   AnimatedNumber
-Lines 2373-2432   SaleBreakdown
-Lines 2434-2440   Sparkline
-Lines 2442-2451   CoachMark
-Lines 2453-2467   SKYLINE_PROFILES (per-location building data)
-Lines 2469-2532   Skyline (renders skyline with buildings, palms, water)
-Lines 2534-2538   priceColor
+Lines 1901-2175   ═══ UI COMPONENTS ═══
+Lines 1905-1912   WeatherOverlay
+Lines 1914-1930   AmbientMotes
+Lines 1932-1948   Particles
+Lines 1949        Neon
+Lines 1950-1961   TravelAnim
+Lines 1962-2008   AnimatedNumber
+Lines 2010-2078   SaleBreakdown
+Lines 2079-2089   CoachMark
+Lines 2091-2105   SKYLINE_PROFILES (per-location building data)
+Lines 2106-2170   Skyline (renders skyline with buildings, palms, water)
+Lines 2171-2175   priceColor
 
-Lines 2540-3630   ═══ MAIN COMPONENT (Cocaine80s) ═══
-Lines 2543-2578   State declarations (game state, UI state)
-Lines 2584-2631   Derived values, feature unlocks, progressive HUD
-Lines 2634-2642   Synth engine lifecycle
-Lines 2645-2721   processEffects (effect dispatcher)
-Lines 2724-2747   Coach mark helpers
-Lines 2750-2755   act() wrapper
-Lines 2758-2771   startGame()
-Lines 2781-2821   doTravel, completeTravelTo (travel + storylet check)
-Lines 2824-2827   doBuy, doSell, doPolice
-Lines 2829-2877   Dialogue handlers (advanceDialogue, makeDialogueChoice)
-Lines 2880-2933   Action handlers (bank, turf, encounters, deals)
-Lines 2935-2950   Visual state (sky gradient, streak border, VHS overlay)
-Lines 2954-2991   COMIC screen
-Lines 2993-3044   TITLE screen
-Lines 3047-3061   POLICE screen
-Lines 3063-3080   POLICE RESULT screen
-Lines 3082-3168   GAME OVER screen (narrative epilogue)
-Lines 3170-3250   BROKE CHOICE screen
-Lines 3252-3340   ESCAPE screen
-Lines 3342-3630   MAIN GAME screen (HUD, tabs, market, bag, travel, bank, empire, life)
+Lines 2177-3270   ═══ MAIN COMPONENT (Cocaine80s) ═══
+Lines 2180-2215   State declarations (game state, UI state)
+Lines 2220-2265   Derived values, feature unlocks, progressive HUD
+Lines 2268-2278   Synth engine lifecycle
+Lines 2280-2355   processEffects (effect dispatcher)
+Lines 2358-2380   Coach mark helpers
+Lines 2383-2388   act() wrapper
+Lines 2391-2403   startGame()
+Lines 2407-2445   doTravel, completeTravelTo (travel + storylet check)
+Lines 2447-2495   Dialogue handlers (advanceDialogue, makeDialogueChoice)
+Lines 2497-2568   Action handlers (bank, turf, encounters, deals)
+Lines 2570-2608   COMIC screen
+Lines 2610-2660   TITLE screen
+Lines 2662-2676   POLICE screen
+Lines 2678-2688   POLICE RESULT screen
+Lines 2690-2730   BROKE CHOICE screen
+Lines 2732-2780   ESCAPE screen
+Lines 2781-2855   GAME OVER screen (narrative epilogue)
+Lines 2956-3270   MAIN GAME screen (HUD, tabs, market, bag, travel, bank, empire, life)
 ```
 
 ## State Shape
@@ -128,7 +116,6 @@ Lines 3342-3630   MAIN GAME screen (HUD, tabs, market, bag, travel, bank, empire
   inv: number[8],            // Units held per drug
   avgC: number[8],           // Average cost per drug (for profit calc)
   coatSp: number,            // Inventory capacity
-  stashInv: number[8],       // Stashed units (in safe house)
 
   // Prices
   prices: number[8],         // Current street prices at current location
@@ -140,7 +127,6 @@ Lines 3342-3630   MAIN GAME screen (HUD, tabs, market, bag, travel, bank, empire
   // Progression
   cred: number,              // Street cred (0-100)
   fedHeat: number,           // Federal heat (0-100)
-  heatLevel: number,         // Difficulty tier (0-6, from HEAT_LADDER)
   currentEra: number,        // Era index (0-4, from ERAS)
   eraStartMove: number,      // Move when current era began
   totalProfit: number,       // Lifetime profit
@@ -183,11 +169,6 @@ Lines 3342-3630   MAIN GAME screen (HUD, tabs, market, bag, travel, bank, empire
   pagerDeal: object | null,   // Active pager deal
   activeDeal: object | null,  // Active poker-style deal
   evtMsg: string | null,      // Current event message
-
-  // Meta
-  playbook: string,           // Playbook ID for this run
-  isDaily: boolean,           // Is this a daily challenge
-  bonusMoves: number,         // Extra moves from upgrades
   achievements: string[],     // Earned this run
   nwHist: number[],           // Net worth history (sparkline)
   scores: number[],           // High scores
@@ -199,7 +180,7 @@ Lines 3342-3630   MAIN GAME screen (HUD, tabs, market, bag, travel, bank, empire
 
 ## Condition Keys (for storylets)
 
-Used in `STORY[id].conditions` and evaluated by `meetsConditions()` (line ~1008):
+Used in `STORY[id].conditions` and evaluated by `meetsConditions()` (line ~869):
 
 | Key | Type | Description |
 |-----|------|-------------|
@@ -223,7 +204,7 @@ Used in `STORY[id].conditions` and evaluated by `meetsConditions()` (line ~1008)
 
 ## Effect Types
 
-Returned in `effects` arrays from state transitions, processed by `processEffects()` (line ~2664):
+Returned in `effects` arrays from state transitions, processed by `processEffects()` (line ~2280):
 
 | Type | Fields | Description |
 |------|--------|-------------|
@@ -260,7 +241,7 @@ User Action (tap buy/sell/travel)
     → Pure state transition returns { state, effects, ... }
   → setG(result.state)           // Update React state
   → processEffects(result.effects) // Dispatch side effects
-    → SFX, particles, screen changes, achievements, meta saves
+    → SFX, particles, screen changes, achievements
   → completeTravelTo also checks:
     → selectStorylet(state)      // NPC/narrator events
     → Newspaper, encounter, turf war, deal events
@@ -268,7 +249,7 @@ User Action (tap buy/sell/travel)
 
 ## processTravel Breakdown
 
-The largest function (~500 lines). On each travel action:
+The largest function (~475 lines). On each travel action:
 
 1. **Radio event** — Random price shock (35-50% chance)
 2. **Price evolution** — Ornstein-Uhlenbeck with momentum
@@ -283,12 +264,12 @@ The largest function (~500 lines). On each travel action:
 11. **Failure bonus** — One-time cheap drug mercy mechanic
 12. **Demand decay** — Career saturation reduces demand over time
 13. **Newspaper** — Every 10 moves
-14. **Random encounter** — Night increases chance
+14. **Random encounter** — Night increases chance; witness defuse prioritized if fuse active
 15. **Pager deal** — ~12% chance, timed bonus contract
 16. **NPC evidence** — Ramirez accumulates passively
 17. **Fuse chains** — Delayed backstory consequences
 18. **Poker deals** — Multi-turn trade with complications
-19. **Defusable fuse timers** — Witness/stash raid timers
+19. **Defusable fuse timers** — Witness timer (defusable via encounter)
 20. **Supplier betrayal** — Same source 5+ times + high heat
 21. **Achievements** — Net worth milestones
 22. **Phase transition** — Action-driven era advancement
@@ -300,44 +281,38 @@ The largest function (~500 lines). On each travel action:
 ### Pure State Transitions (no side effects)
 | Function | Line | Input | Returns |
 |----------|------|-------|---------|
-| `processTravel(s, destLoc)` | ~1318 | state, destination | `{ state, effects, turfWar, newspaper, randEnc, npcEvent, dealEvent }` |
-| `processBuyDrug(s, idx, amt)` | ~1820 | state, drug index, amount | `{ state, ok, cost, busted, fees, effects }` |
-| `processSellDrug(s, idx, amt)` | ~1865 | state, drug index, amount | `{ state, ok, rev, prof, streak, effects }` |
-| `processPolice(s, action)` | ~1962 | state, "run"/"fight"/"bribe" | `{ state, resultText, effects }` |
-| `processBuyTurf(s, locIdx)` | ~1986 | state, location | `{ state, ok, effects }` |
-| `processHireEnforcers(s, locIdx, count)` | ~2005 | state, location, count | `{ state, ok, effects }` |
-| `processTurfWar(s, turfWar, action)` | ~2014 | state, war data, action | `{ state, effects }` |
-| `processEncounter(s, enc, action)` | ~2047 | state, encounter, action | `{ state, effects }` |
-| `processBank(s, action, amount)` | ~2079 | state, action, amount | `{ state, ok, effects }` |
-| `processBuyLifestyle(s, effect)` | ~2096 | state, effect key | `{ state, ok, item, effects }` |
-| `processBuySafeHouse(s, tier)` | ~2115 | state, safe house tier | `{ state, ok, effects }` |
-| `processBuyGun(s)` | ~2125 | state | `{ state, ok, effects }` |
+| `processTravel(s, destLoc)` | ~988 | state, destination | `{ state, effects, turfWar, newspaper, randEnc, npcEvent, dealEvent }` |
+| `processBuyDrug(s, idx, amt)` | ~1465 | state, drug index, amount | `{ state, ok, cost, busted, fees, effects }` |
+| `processSellDrug(s, idx, amt)` | ~1505 | state, drug index, amount | `{ state, ok, rev, prof, streak, effects }` |
+| `processPolice(s, action)` | ~1599 | state, "run"/"fight"/"bribe" | `{ state, resultText, effects }` |
+| `processBuyTurf(s, locIdx)` | ~1623 | state, location | `{ state, ok, effects }` |
+| `processHireEnforcers(s, locIdx, count)` | ~1642 | state, location, count | `{ state, ok, effects }` |
+| `processTurfWar(s, turfWar, action)` | ~1651 | state, war data, action | `{ state, effects }` |
+| `processEncounter(s, enc, action)` | ~1684 | state, encounter, action | `{ state, effects }` |
+| `processBank(s, action, amount)` | ~1721 | state, action, amount | `{ state, ok, effects }` |
+| `processBuyLifestyle(s, effect)` | ~1738 | state, effect key | `{ state, ok, item, effects }` |
+| `processBuySafeHouse(s, tier)` | ~1756 | state, safe house tier | `{ state, ok, effects }` |
+| `processBuyGun(s)` | ~1766 | state | `{ state, ok, effects }` |
 
 ### Narrative Engine
 | Function | Line | Purpose |
 |----------|------|---------|
-| `computeQualities(s)` | ~999 | Derive `flash` and `productId` from state |
-| `meetsConditions(conds, s, q)` | ~1008 | Check if storylet conditions are met |
-| `selectStorylet(s)` | ~1051 | Pick highest-priority matching storylet |
-| `applyChoiceEffects(s, eff)` | ~1064 | Apply storylet choice effects to state |
-| `generateNarrative(s)` | ~365 | Generate end-of-run narrative epilogue |
+| `computeQualities(s)` | ~859 | Derive `flash` and `productId` from state |
+| `meetsConditions(conds, s, q)` | ~869 | Check if storylet conditions are met |
+| `selectStorylet(s)` | ~911 | Pick highest-priority matching storylet |
+| `applyChoiceEffects(s, eff)` | ~925 | Apply storylet choice effects to state |
+| `generateNarrative(s)` | ~234 | Generate end-of-run narrative epilogue |
 
 ### Price Engine
 | Function | Line | Purpose |
 |----------|------|---------|
-| `initBasePrices()` | ~489 | Generate initial base prices around drug means |
-| `initMomentum()` | ~490 | Generate initial random momentum values |
-| `evolveBasePrices(prev, mom, ...)` | ~492 | Ornstein-Uhlenbeck price evolution |
-| `evolveMomentum(prev)` | ~499 | Evolve momentum with random reversals |
-| `getStreetPrices(base, loc, era, demand, multi)` | ~501 | Calculate final street prices |
+| `initBasePrices()` | ~359 | Generate initial base prices around drug means |
+| `initMomentum()` | ~360 | Generate initial random momentum values |
+| `evolveBasePrices(prev, mom, ...)` | ~362 | Ornstein-Uhlenbeck price evolution |
+| `evolveMomentum(prev)` | ~370 | Evolve momentum with random reversals |
+| `getStreetPrices(base, loc, era, demand)` | ~372 | Calculate final street prices |
 
-### Meta-Progression
+### State Factory
 | Function | Line | Purpose |
 |----------|------|---------|
-| `loadMeta()` | ~1092 | Load from localStorage |
-| `saveMeta(meta)` | ~1100 | Save to localStorage |
-| `calcRepEarned(g, finalNW, heatLevel, playbook, isDaily)` | ~1107 | Calculate rep from a run |
-| `applySafehouseUpgrades(state, upgrades)` | ~1137 | Apply persistent upgrades |
-| `applyPlaybookMods(state, playbook)` | ~1188 | Apply playbook starting mods |
-| `applyDailyMods(state, modifiers)` | ~1220 | Apply daily challenge modifiers |
-| `createInitialState(heat, playbook, daily, upgrades)` | ~1258 | Build initial game state |
+| `createInitialState()` | ~940 | Build initial game state (no parameters) |

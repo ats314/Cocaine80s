@@ -345,7 +345,8 @@ const ENCOUNTERS = [
 { type:“tip”, text:“A sunburned tourist in a Hawaiian shirt corners you. "Hey buddy, you know where I can get some…" He does the nose-touch gesture with all the subtlety of a man wearing a Hawaiian shirt in a drug neighborhood.”, chance:.10 },
 { type:“find”, text:“Someone hands you a black card with a gold address. No name. Just: TONIGHT. MIDNIGHT. BRING PRODUCT AND A SWIMSUIT. The address is a penthouse on Fisher Island.”, amount:[2,8], chance:.06 },
 { type:“snitch_warning”, text:“You’re cutting through the alley and there’s a body. Not fresh, but not old. The suit is nice — nicer than yours. The pockets are empty except for a pager. You walk. Faster than usual.”, heatGain:8, chance:.05 },
-{ type:“tip”, text:“A realtor with physics-defying hair hands you a card. "I have a property in Coconut Grove. The previous owner is… no longer available. There may be items in the basement you’d find professionally interesting."”, chance:.06 },
+{ type:”tip”, text:”A realtor with physics-defying hair hands you a card. “I have a property in Coconut Grove. The previous owner is… no longer available. There may be items in the basement you’d find professionally interesting.””, chance:.06 },
+{ type:”witness_defuse”, text:”A kid from the block pulls you aside. “That lady from your last big deal? She’s been talking to a detective. I know where she lives. Two grand and she forgets everything.””, cost:2000, chance:1 },
 ];
 
 // ── HELPERS ──
@@ -1136,12 +1137,17 @@ if (nm > 0 && nm % 10 === 0) newspaper = NEWSPAPERS[R(0, NEWSPAPERS.length - 1)]
 
 // Random encounter
 let randEnc = null;
-if (nm > 8 && Math.random() < (isNight ? .30 : .18)) {
-const pool = ENCOUNTERS.filter(e => Math.random() < e.chance);
+// Witness defuse opportunity — if a witness fuse is ticking, 40% chance per travel to offer the defuse
+const activeWitness = fuseTimers.find(f => f.id === 'witness' && !f.defused);
+if (activeWitness && Math.random() < 0.4) {
+const defuseEnc = ENCOUNTERS.find(e => e.type === “witness_defuse”);
+randEnc = { …defuseEnc, fuseId: 'witness' };
+} else if (nm > 8 && Math.random() < (isNight ? .30 : .18)) {
+const pool = ENCOUNTERS.filter(e => e.type !== “witness_defuse” && Math.random() < e.chance);
 if (pool.length > 0) {
 const enc = pool[R(0, pool.length - 1)];
 if (enc.type === “find”) randEnc = { …enc, drugIdx: R(0, DRUG_COUNT - 1), amt: R(enc.amount[0], enc.amount[1]) };
-else if (enc.type === “tip”) randEnc = { …enc, text: enc.text.replace(”{d}”, DRUGS[R(0, DRUG_COUNT - 1)].name).replace(”{l}”, LOCS[R(0, 5)].name) };
+else if (enc.type === “tip”) randEnc = { …enc, text: enc.text.replace(“{d}”, DRUGS[R(0, DRUG_COUNT - 1)].name).replace(“{l}”, LOCS[R(0, 5)].name) };
 else if (enc.type === “mugger”) randEnc = { …enc, hpLoss: R(enc.hpLoss[0], enc.hpLoss[1]), cashLoss: R(enc.cashLoss[0], enc.cashLoss[1]) };
 else if (enc.type === “bribe_offer”) randEnc = { …enc, cost: R(enc.cost[0], enc.cost[1]) };
 else randEnc = { …enc };
@@ -1327,7 +1333,7 @@ return { …f, defused: true };
 return f;
 });
 
-// TODO: Witness defuse opportunity — return to deal location and pay $2K (not yet wired to encounter system)
+// Witness defuse opportunity handled via encounter system (witness_defuse encounter type)
 
 // ── SUPPLIER BETRAYAL — same source too many times + heat ──
 const supplierCount = (s.supplierHistory||{})[destLoc] || 0;
@@ -1486,11 +1492,10 @@ const oldQ = s.inv[i], newQ = oldQ + amt;
 return Math.floor((a * oldQ + finalPrice * amt) / newQ);
 });
 
-const credMulti = 1;
 // Track supplier history for betrayal triggers
 const newSupplierHist = { …(s.supplierHistory||{}), [s.loc]: ((s.supplierHistory||{})[s.loc]||0) + 1 };
 return {
-state: { …s, cash: s.cash - cost, inv: newInv, avgC: newAvgC, cred: Math.min(100, s.cred + credMulti), fedHeat: Math.min(100, s.fedHeat + Math.ceil(amt / 30)),
+state: { …s, cash: s.cash - cost, inv: newInv, avgC: newAvgC, cred: Math.min(100, s.cred + 1), fedHeat: Math.min(100, s.fedHeat + Math.ceil(amt / 30)),
 totalDeals: (s.totalDeals||0) + 1, dealsSinceLastEvent: (s.dealsSinceLastEvent||0) + 1, supplierHistory: newSupplierHist },
 ok: true, cost,
 effects: [{ type: ‘SFX’, name: ‘buy’ }, { type: ‘SPAWN’, text: `-${FM(cost)}`, color: C.pink }],
@@ -1575,14 +1580,13 @@ newPagerDeal = null;
 effects.push({ type: ‘SPAWN’, text: “📟 PAGER DEAL COMPLETE!”, color: C.gold, delay: 1000, size: 12 });
 }
 
-const credMulti = 1;
 // Big sales generate evidence — the streets talk
 let sellNpcState = s.npcState;
 if (rev > 10000 && s.npcState?.ramirez?.met) {
 sellNpcState = { …s.npcState, ramirez: { …s.npcState.ramirez, evidence: Math.min(20, (s.npcState.ramirez.evidence||0) + 1) } };
 }
 return {
-state: { …s, cash: s.cash + rev, inv: newInv, demand: newDemand, cred: Math.min(100, s.cred + (prof > 0 ? 2 * credMulti : credMulti)),
+state: { …s, cash: s.cash + rev, inv: newInv, demand: newDemand, cred: Math.min(100, s.cred + (prof > 0 ? 2 : 1)),
 achievements: achs, streak: newStreak, bestStreak, biggestDeal, totalProfit: s.totalProfit + (prof > 0 ? prof : 0),
 totalDeals: (s.totalDeals||0) + 1, dealsSinceLastEvent: (s.dealsSinceLastEvent||0) + 1, npcState: sellNpcState,
 pagerDeal: newPagerDeal,
@@ -1704,6 +1708,11 @@ else { cash = Math.max(0, cash - bet); effects.push({ type: ‘SPAWN’, text: `
 cash -= enc.cost; hp = Math.min(100, hp + enc.hpGain); effects.push({ type: ‘SPAWN’, text: ‘+HP’, color: C.green });
 } else if (enc.type === “snitch_warning”) {
 fedHeat = Math.min(100, fedHeat + enc.heatGain);
+} else if (enc.type === “witness_defuse” && action === “accept” && cash >= enc.cost) {
+cash -= enc.cost;
+const newTimers = (s.fuseTimers || []).map(f => f.id === enc.fuseId ? { …f, defused: true } : f);
+effects.push({ type: 'SPAWN', text: '🤫 Witness silenced', color: C.green, size: 13 });
+return { state: { …s, hp, cash, cred, fedHeat, inv, fuseTimers: newTimers }, effects };
 }
 
 return { state: { …s, hp, cash, cred, fedHeat, inv }, effects };
@@ -2903,6 +2912,7 @@ const encOverlay = randEnc && <div style={{ position: “fixed”, top: 0, left:
 {randEnc.type === “bribe_offer” && <div style={{ display: “flex”, gap: 8, justifyContent: “center” }}><button onClick={() => doEncounter(“accept”)} disabled={g.cash < randEnc.cost} style={{ …bt(C.blue), opacity: g.cash >= randEnc.cost ? 1 : .3 }}>PAY {FM(randEnc.cost)}</button><button onClick={() => doEncounter(“decline”)} style={bt(C.dim)}>DECLINE</button></div>}
 {randEnc.type === “gamble” && <div style={{ display: “flex”, gap: 8, justifyContent: “center” }}><button onClick={() => doEncounter(“accept”)} style={bt(C.gold)}>🎲 BET</button><button onClick={() => doEncounter(“decline”)} style={bt(C.dim)}>WALK AWAY</button></div>}
 {randEnc.type === “healer” && <div style={{ display: “flex”, gap: 8, justifyContent: “center” }}><button onClick={() => doEncounter(“accept”)} disabled={g.cash < randEnc.cost || g.hp >= 100} style={{ …bt(C.green), opacity: g.cash >= randEnc.cost && g.hp < 100 ? 1 : .3 }}>PAY {FM(randEnc.cost)} (+HP)</button><button onClick={() => doEncounter(“decline”)} style={bt(C.dim)}>NO THANKS</button></div>}
+{randEnc.type === “witness_defuse” && <div style={{ display: “flex”, gap: 8, justifyContent: “center” }}><button onClick={() => doEncounter(“accept”)} disabled={g.cash < randEnc.cost} style={{ …bt(C.green), opacity: g.cash >= randEnc.cost ? 1 : .3 }}>PAY {FM(randEnc.cost)}</button><button onClick={() => doEncounter(“decline”)} style={bt(C.dim)}>TOO RISKY</button></div>}
 {(randEnc.type === “tip” || randEnc.type === “snitch_warning”) && <button onClick={() => doEncounter(“ok”)} style={bt(C.blue)}>GOT IT</button>}
 </div>
 

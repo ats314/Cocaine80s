@@ -40,7 +40,7 @@ Where `N(0,1)` is a standard normal random variable (`randNorm()`).
 ### Street Price Calculation
 
 ```
-streetPrice = basePrice × locationMod × eraDemand × localDemand × noise × priceMulti
+streetPrice = basePrice × locationMod × eraDemand × localDemand × noise
 noise = 1 + N(0,1) × 0.05   // ±5% random
 ```
 
@@ -102,7 +102,7 @@ newDemand = max(0.4, demand - qty × 0.010)
 
 Per-move recovery:
 ```
-newDemand = max(0.4, (demand + (1 - demand) × 0.20) × dailyDemandMod × careerSaturation)
+newDemand = max(0.4, (demand + (1 - demand) × 0.20) × careerSaturation)
 careerSaturation = max(0.75, 1 - totalDeals × 0.001)  // Floor at 0.75 after 250 deals
 ```
 
@@ -128,8 +128,7 @@ floor = totalProfit / 50000 + totalBusts × 3
 ### Police Encounter Chance
 
 ```
-policeChance = locHeat × 0.5 × eraCopsMod × heatLadderCopsMod × playbookCopsMod
-             × dailyCopsMod × safehouseHeatMod × (1 + fedHeat/300) × nightMod × wealthMod
+policeChance = locHeat × 0.5 × eraCopsMod × (1 + fedHeat/300) × nightMod × wealthMod
 
 nightMod = 1.2 if night, 1.0 if day
 wealthMod = 1.6 (cash ≥ $500K) | 1.4 (≥$250K) | 1.2 (≥$100K) | 1.0
@@ -153,7 +152,7 @@ Only triggers if carrying product.
 ```
 if (amount ≤ 3) return 0;  // Small deals are safe
 sizeMultiplier = ((amount - 8) / 40)^2   // Quadratic above 8 units
-risk = min(0.85, locHeat × 0.5 × (1 + sizeMultiplier) × copsMods × (1 + fedHeat/200))
+risk = min(0.85, locHeat × 0.5 × (1 + sizeMultiplier) × eraCopsMod × (1 + fedHeat/200))
 ```
 
 Sell risk is multiplied by 0.6 (selling is safer than buying).
@@ -163,8 +162,6 @@ Sell risk is multiplied by 0.6 (selling is safer than buying).
 ```
 fees = floor(txValue × 0.2 × eraPenaltyMod) + random(200, 800)
 ```
-
-Modified by `legalFeeMod` from safehouse upgrades.
 
 ### Police Encounter Outcomes
 
@@ -189,7 +186,7 @@ Modified by `legalFeeMod` from safehouse upgrades.
 
 **Interest:** Every 4 moves:
 ```
-baseInterest = 0.08 (or 0.08 × interestMod for Banker playbook)
+baseInterest = 0.08
 debtPenalty = +0.06 (≥$30K) | +0.04 (≥$20K) | +0.02 (≥$10K) | 0
 debt = floor(debt × (1 + baseInterest + debtPenalty))
 ```
@@ -302,9 +299,9 @@ Action-driven (minimum 5 moves per era):
 
 ### Cred
 
-- +1 per buy (× credMultiplier)
-- +2 per profitable sell (× credMultiplier)
-- +1 per unprofitable sell (× credMultiplier)
+- +1 per buy
+- +2 per profitable sell
+- +1 per unprofitable sell
 - +5 from Maria's party
 - +5 from buying turf
 - +3-8 from turf war victories
@@ -359,7 +356,7 @@ Consecutive profitable trades. Bonuses:
 
 ## Pager Deals
 
-12% base chance per travel (after move 5). Modified by `pagerChanceMod` upgrade.
+12% base chance per travel (after move 5).
 
 - **Bonus:** 30-150% over street price
 - **Quantity:** 5-40 units
@@ -395,79 +392,7 @@ Activate when: cred ≥ 40, cash ≥ $30K, 15+ deals, era ≥ 1, 15% chance
 | Gamble | 45% win, bet 20% of cash (max $2000) |
 | Healer | $300 for +30 HP |
 | Snitch warning | +5-8 heat, flavor text |
-
----
-
-## Meta-Progression (Not Yet in UI)
-
-### Heat Ladder (Difficulty)
-
-| Level | Name | Cops Mod | Price Mod | Start Cash | Start Debt |
-|-------|------|----------|-----------|-----------|------------|
-| 0 | Tourist | 1.0 | 1.0 | $5,000 | $8,000 |
-| 1 | Corner Boy | 1.15 | 1.0 | $5,000 | $8,000 |
-| 2 | Hustler | 1.25 | 1.15 | $4,500 | $8,000 |
-| 3 | Dealer | 1.4 | 1.2 | $3,500 | $8,000 |
-| 4 | Supplier | 1.6 | 1.3 | $3,000 | $10,000 |
-| 5 | Kingpin | 2.0 | 1.5 | $2,000 | $12,000 |
-| 6 | Scarface | 2.5 | 1.7 | $1,500 | $15,000 |
-
-### Playbooks (Character Classes)
-
-| Playbook | Key Mods |
-|----------|----------|
-| Hustler 🎲 | Baseline — no mods |
-| Mule 🧳 | $3K start, +40 inventory |
-| Connected 🤝 | Maria trust +3, Colombiano trust +2 |
-| Enforcer 👊 | Start with corner + 2 enforcers in Overtown |
-| Smuggler 🚤 | Start in Keys, 50% boat discount, 30% cheaper imports |
-| Banker 💰 | $8K cash, $5K debt, 25% interest rate |
-| Ghost 👻 | Cops -30%, cred -20%, heat -5 |
-| Kingpin 👑 | $15K debt, 2× cred gains. Requires 5000 rep to unlock |
-
-### Rep Calculation
-
-```
-rep = floor(netWorth / 1000)
-rep *= (1 + heatLevel × 0.2)        // Difficulty bonus
-rep += achievements.length × 50      // Achievement bonus
-rep += bestStreak × 10               // Streak bonus
-rep += (hp > 0 ? 200 : 0)           // Survival bonus
-rep += (debt ≤ 0 ? 300 : 0)         // Debt-free bonus
-if (isDaily) rep *= 1.5              // Daily challenge bonus
-```
-
-### Safehouse Upgrades (Persistent)
-
-| Upgrade | Cost | Max Level | Effect per Level |
-|---------|------|-----------|-----------------|
-| Rainy Day Fund 💵 | 500 | 3 | +$500 starting cash |
-| Bigger Coat 🧥 | 750 | 3 | +15 inventory space |
-| Cool Connections ❄️ | 1000 | 3 | -5% police attention |
-| Street Rep ⭐ | 600 | 3 | +5 starting cred |
-| Piece in the Drawer 🔫 | 2000 | 1 | Start with gun |
-| Pager Network 📟 | 1500 | 2 | +10% pager deal chance |
-| Time Management ⏰ | 2500 | 2 | +3 bonus moves |
-| Market Intel 📊 | 1200 | 2 | +5% buy price discount |
-| Smooth Talker 🗣️ | 800 | 2 | -15% legal fees |
-| Offshore Account 🏦 | 3000 | 1 | Start with bank unlocked |
-
-### Daily Challenge Modifiers
-
-2-3 selected per day from seeded RNG:
-
-| Modifier | Effect |
-|----------|--------|
-| Supply Drought 📈 | All prices +40% |
-| Market Flood 📉 | All prices -30% |
-| Federal Crackdown 🚔 | Cops +50% |
-| Holiday Weekend 🎉 | Demand +60% |
-| Heat Wave 🌡️ | Heat decays 50% slower |
-| Recession 💸 | Start with -$2K cash |
-| Windfall 🎰 | Start with +$3K cash |
-| Paranoid City 👁️ | All NPCs start hostile (trust -3) |
-| Gold Mine ⛏️ | Pager deals pay +50% |
-| Speed Run ⚡ | Only 40 moves |
+| Witness defuse | Pay $2K to silence a witness (appears when witness fuse active, 40% chance) |
 
 ---
 
@@ -482,6 +407,6 @@ if (isDaily) rep *= 1.5              // Daily challenge bonus
 | Speed up era progression | Lower thresholds in PHASE_TRANSITIONS |
 | Change loan shark pressure | Adjust debt tiers in processTravel (~line 1406) |
 | Modify turf economics | Change `income`/`cost` in TURF_LEVELS |
-| Adjust cred gains | Change `credMultiplier` or per-action cred additions |
+| Adjust cred gains | Change per-action cred additions in processBuyDrug/processSellDrug |
 | Scale enforcer effectiveness | Change power formula in processTurfWar |
 | Tune pager deal frequency | Change base 0.12 chance in processTravel (~line 1492) |
