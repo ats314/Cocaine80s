@@ -264,13 +264,12 @@ The largest function (~475 lines). On each travel action:
 11. **Failure bonus** — One-time cheap drug mercy mechanic
 12. **Demand decay** — Career saturation reduces demand over time
 13. **Newspaper** — Every 10 moves
-14. **Random encounter** — Night increases chance; witness defuse prioritized if fuse active
+14. **Random encounter** — Night increases chance; defuse encounters (witness, DEA) prioritized if fuse active
 15. **Pager deal** — ~12% chance, timed bonus contract
 16. **NPC evidence** — Ramirez accumulates passively
 17. **Fuse chains** — Delayed backstory consequences
 18. **Poker deals** — Multi-turn trade with complications
-19. **Defusable fuse timers** — Witness timer (defusable via encounter)
-20. **Supplier betrayal** — Same source 5+ times + high heat
+19. **Defusable fuse timers** — Witness, DEA surveillance, and supplier betrayal (all via fuse system)
 21. **Achievements** — Net worth milestones
 22. **Phase transition** — Action-driven era advancement
 23. **Ending checks** — Bust, dead, broke, burned, informant, escape

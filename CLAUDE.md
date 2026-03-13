@@ -150,6 +150,9 @@ Tabs within `game`: market, bag, travel, bank, empire, life
 ## Recently Completed Features
 
 1. **Witness defuse encounter** — When a witness fuse is active, a $2K defuse opportunity appears as a random encounter (40% chance per travel)
+2. **DEA surveillance fuse** — Plants when fedHeat ≥45 and profit ≥$80K; detonates after 6 moves (+12 heat, +2 evidence); defusable for $5K
+3. **Supplier betrayal → fuse timer** — Converted from random-per-travel to deterministic fuse (4-move timer), planted when 5+ buys at same location + heat ≥20
+4. **Coach marks** — Added contextual hints for first encounter, first poker deal, and first defuse opportunity
 
 ## Testing
 

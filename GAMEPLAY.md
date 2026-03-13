@@ -393,6 +393,7 @@ Activate when: cred ≥ 40, cash ≥ $30K, 15+ deals, era ≥ 1, 15% chance
 | Healer | $300 for +30 HP |
 | Snitch warning | +5-8 heat, flavor text |
 | Witness defuse | Pay $2K to silence a witness (appears when witness fuse active, 40% chance) |
+| DEA defuse | Pay $5K to kill a wiretap warrant (appears when DEA surveillance fuse active, 40% chance) |
 
 ---
 

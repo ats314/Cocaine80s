@@ -146,7 +146,10 @@ const COACH_MARKS = [
 { id:“new_loc”,    text:“Prices are different here”, trigger:“first_travel”, dismiss:“open_market” },
 { id:“sell_high”,  text:“This sells for more here 📈”, trigger:“profitable_item”, dismiss:“first_sell” },
 { id:“heat_warn”,  text:“Heat rises when you deal big ⚠️”, trigger:“first_police”, dismiss:“timer”, timerMs:3000 },
-{ id:“loan_help”,  text:“Need cash? Pay off debt in Bank 🦈”, trigger:“first_broke”, dismiss:“timer”, timerMs:4000 },
+{ id:”loan_help”,  text:”Need cash? Pay off debt in Bank 🦈”, trigger:”first_broke”, dismiss:”timer”, timerMs:4000 },
+{ id:”enc_intro”,  text:”Random encounter — read carefully ⚡”, trigger:”first_encounter”, dismiss:”timer”, timerMs:3000 },
+{ id:”deal_intro”, text:”Multi-step deal — choices matter 🤝”, trigger:”first_deal”, dismiss:”timer”, timerMs:3500 },
+{ id:”defuse_hint”,text:”Pay now or face consequences later 💣”, trigger:”first_defuse”, dismiss:”timer”, timerMs:3500 },
 ];
 
 const COMIC_PANELS = [
@@ -346,7 +349,10 @@ const ENCOUNTERS = [
 { type:“find”, text:“Someone hands you a black card with a gold address. No name. Just: TONIGHT. MIDNIGHT. BRING PRODUCT AND A SWIMSUIT. The address is a penthouse on Fisher Island.”, amount:[2,8], chance:.06 },
 { type:“snitch_warning”, text:“You’re cutting through the alley and there’s a body. Not fresh, but not old. The suit is nice — nicer than yours. The pockets are empty except for a pager. You walk. Faster than usual.”, heatGain:8, chance:.05 },
 { type:”tip”, text:”A realtor with physics-defying hair hands you a card. “I have a property in Coconut Grove. The previous owner is… no longer available. There may be items in the basement you’d find professionally interesting.””, chance:.06 },
+// witness_defuse is filtered out of normal pool — only appears when witness fuse is active (see processTravel)
 { type:”witness_defuse”, text:”A kid from the block pulls you aside. “That lady from your last big deal? She’s been talking to a detective. I know where she lives. Two grand and she forgets everything.””, cost:2000, chance:1 },
+// dea_defuse only appears when DEA surveillance fuse is active (see processTravel)
+{ type:”dea_defuse”, text:”A courthouse clerk you know pulls you aside. “There’s a wiretap warrant with your name on it. My lawyer buddy can get it killed — five grand, cash.””, cost:5000, chance:1 },
 ];
 
 // ── HELPERS ──
@@ -1137,13 +1143,17 @@ if (nm > 0 && nm % 10 === 0) newspaper = NEWSPAPERS[R(0, NEWSPAPERS.length - 1)]
 
 // Random encounter
 let randEnc = null;
-// Witness defuse opportunity — if a witness fuse is ticking, 40% chance per travel to offer the defuse
+// Defuse opportunities — active fuses get priority (40% chance each)
 const activeWitness = fuseTimers.find(f => f.id === 'witness' && !f.defused);
+const activeDEA = fuseTimers.find(f => f.id === 'dea_surveil' && !f.defused);
 if (activeWitness && Math.random() < 0.4) {
 const defuseEnc = ENCOUNTERS.find(e => e.type === “witness_defuse”);
 randEnc = { …defuseEnc, fuseId: 'witness' };
+} else if (activeDEA && Math.random() < 0.4) {
+const defuseEnc = ENCOUNTERS.find(e => e.type === “dea_defuse”);
+randEnc = { …defuseEnc, fuseId: 'dea_surveil' };
 } else if (nm > 8 && Math.random() < (isNight ? .30 : .18)) {
-const pool = ENCOUNTERS.filter(e => e.type !== “witness_defuse” && Math.random() < e.chance);
+const pool = ENCOUNTERS.filter(e => e.type !== “witness_defuse” && e.type !== “dea_defuse” && Math.random() < e.chance);
 if (pool.length > 0) {
 const enc = pool[R(0, pool.length - 1)];
 if (enc.type === “find”) randEnc = { …enc, drugIdx: R(0, DRUG_COUNT - 1), amt: R(enc.amount[0], enc.amount[1]) };
@@ -1318,32 +1328,47 @@ let fuseTimers = […(s.fuseTimers || [])];
 // Plant: Witness fuse — big public deal in high-traffic location
 if ((s.biggestDeal||0) >= 15000 && [0,1,3].includes(destLoc) && !fuseTimers.some(f => f.id === ‘witness’) && !s.storyFlags?.witness_fired) {
 fuseTimers.push({ id: ‘witness’, movePlanted: nm, fuseLength: 8, defused: false });
-// No message — the player doesn’t know the fuse is lit
+}
+
+// Plant: DEA surveillance fuse — high federal heat draws wiretap attention
+if (nh >= 45 && (s.totalProfit||0) >= 80000 && !fuseTimers.some(f => f.id === ‘dea_surveil’) && !s.storyFlags?.dea_surveil_fired) {
+fuseTimers.push({ id: ‘dea_surveil’, movePlanted: nm, fuseLength: 6, defused: false });
+}
+
+// Plant: Supplier betrayal fuse — same source too many times + heat
+const supplierCount = (s.supplierHistory||{})[destLoc] || 0;
+if (supplierCount >= 5 && nh >= 20 && !fuseTimers.some(f => f.id === `supplier_${destLoc}`) && !s.storyFlags?.[`supplier_flipped_${destLoc}`]) {
+fuseTimers.push({ id: `supplier_${destLoc}`, movePlanted: nm, fuseLength: 4, defused: false, loc: destLoc });
 }
 
 // Detonate fuses
+let supplierFlipped = false;
 fuseTimers = fuseTimers.map(f => {
 if (f.defused || nm < f.movePlanted + f.fuseLength) return f;
-// BOOM
 if (f.id === ‘witness’ && !s.storyFlags?.witness_fired) {
 if (!evtMsg) evtMsg = “🕵️ A witness from your deal talked. Police sketch circulating. Ramirez has a new lead.”;
 npcState.ramirez.evidence = Math.min(20, (npcState.ramirez.evidence||0) + 3);
 return { …f, defused: true };
 }
-return f;
-});
-
-// Witness defuse opportunity handled via encounter system (witness_defuse encounter type)
-
-// ── SUPPLIER BETRAYAL — same source too many times + heat ──
-const supplierCount = (s.supplierHistory||{})[destLoc] || 0;
-let supplierFlipped = false;
-if (supplierCount >= 5 && nh >= 20 && !s.storyFlags?.[`supplier_flipped_${destLoc}`] && Math.random() < 0.3) {
-if (!evtMsg) evtMsg = `🐀 Your regular connect in ${LOCS[destLoc].name} got flipped. Deals here carry a sting risk now.`;
+if (f.id === ‘dea_surveil’ && !s.storyFlags?.dea_surveil_fired) {
+if (!evtMsg) evtMsg = “📡 A DEA wiretap caught your name on three calls this week. Federal heat is climbing.”;
+nh = Math.min(100, nh + 12);
+npcState.ramirez.evidence = Math.min(20, (npcState.ramirez.evidence||0) + 2);
+effects.push({ type: ‘SHAKE’ });
+return { …f, defused: true };
+}
+if (f.id.startsWith(‘supplier_’) && !s.storyFlags?.[`supplier_flipped_${f.loc}`]) {
+const flippedLoc = f.loc;
+if (!evtMsg) evtMsg = `🐀 Your regular connect in ${LOCS[flippedLoc].name} got flipped. Deals here carry a sting risk now.`;
 npcState.ramirez.evidence = Math.min(20, (npcState.ramirez.evidence||0) + 2);
 effects.push({ type: ‘SHAKE’ });
 supplierFlipped = true;
+return { …f, defused: true };
 }
+return f;
+});
+
+// Defuse opportunities handled via encounter system (witness_defuse, dea_defuse encounter types)
 
 // Achievements
 const achs = […s.achievements];
@@ -1438,11 +1463,12 @@ finalInv = activeDeal.newInv;
 activeDeal = null; // Clear after resolution
 }
 // Handle stash raid
-// Track witness/supplier/failure flags
+// Track fuse/supplier/failure flags
 const newFlags = { …(s.storyFlags||{}) };
 if (fuseTimers.some(f => f.id === ‘witness’ && f.defused)) newFlags.witness_fired = true;
+if (fuseTimers.some(f => f.id === ‘dea_surveil’ && f.defused)) newFlags.dea_surveil_fired = true;
+fuseTimers.filter(f => f.id.startsWith(‘supplier_’) && f.defused).forEach(f => { newFlags[`supplier_flipped_${f.loc}`] = true; });
 if (usedFailureBonus) newFlags.got_failure_bonus = true;
-if (supplierFlipped) newFlags[`supplier_flipped_${destLoc}`] = true;
 
 return {
 state: {
@@ -1712,6 +1738,12 @@ fedHeat = Math.min(100, fedHeat + enc.heatGain);
 cash -= enc.cost;
 const newTimers = (s.fuseTimers || []).map(f => f.id === enc.fuseId ? { …f, defused: true } : f);
 effects.push({ type: 'SPAWN', text: '🤫 Witness silenced', color: C.green, size: 13 });
+return { state: { …s, hp, cash, cred, fedHeat, inv, fuseTimers: newTimers }, effects };
+} else if (enc.type === “dea_defuse” && action === “accept” && cash >= enc.cost) {
+cash -= enc.cost;
+const newTimers = (s.fuseTimers || []).map(f => f.id === enc.fuseId ? { …f, defused: true } : f);
+fedHeat = Math.max(0, fedHeat - 5);
+effects.push({ type: 'SPAWN', text: '📋 Wiretap killed', color: C.green, size: 13 });
 return { state: { …s, hp, cash, cred, fedHeat, inv, fuseTimers: newTimers }, effects };
 }
 
@@ -2404,10 +2436,10 @@ const result = processTravel(g, dest);
 setG(result.state);
 processEffects(result.effects);
 if (result.newspaper) setNewspaper(result.newspaper);
-if (result.randEnc) setRandEnc(result.randEnc);
+if (result.randEnc) { setRandEnc(result.randEnc); if (!coachShown["enc_intro"] && result.randEnc.type !== "witness_defuse" && result.randEnc.type !== "dea_defuse") showCoach("enc_intro"); if (!coachShown["defuse_hint"] && (result.randEnc.type === "witness_defuse" || result.randEnc.type === "dea_defuse")) showCoach("defuse_hint"); }
 if (result.turfWar) setTurfWar(result.turfWar);
 if (result.npcEvent) setNpcEvent(result.npcEvent);
-if (result.dealEvent) setDealEvt(result.dealEvent);
+if (result.dealEvent) { setDealEvt(result.dealEvent); if (!coachShown["deal_intro"]) showCoach("deal_intro"); }
 // Coach marks: first travel + profitable item check
 dismissCoach(“force”);
 if (!coachShown[“new_loc”]) showCoach(“new_loc”);
@@ -2913,6 +2945,7 @@ const encOverlay = randEnc && <div style={{ position: “fixed”, top: 0, left:
 {randEnc.type === “gamble” && <div style={{ display: “flex”, gap: 8, justifyContent: “center” }}><button onClick={() => doEncounter(“accept”)} style={bt(C.gold)}>🎲 BET</button><button onClick={() => doEncounter(“decline”)} style={bt(C.dim)}>WALK AWAY</button></div>}
 {randEnc.type === “healer” && <div style={{ display: “flex”, gap: 8, justifyContent: “center” }}><button onClick={() => doEncounter(“accept”)} disabled={g.cash < randEnc.cost || g.hp >= 100} style={{ …bt(C.green), opacity: g.cash >= randEnc.cost && g.hp < 100 ? 1 : .3 }}>PAY {FM(randEnc.cost)} (+HP)</button><button onClick={() => doEncounter(“decline”)} style={bt(C.dim)}>NO THANKS</button></div>}
 {randEnc.type === “witness_defuse” && <div style={{ display: “flex”, gap: 8, justifyContent: “center” }}><button onClick={() => doEncounter(“accept”)} disabled={g.cash < randEnc.cost} style={{ …bt(C.green), opacity: g.cash >= randEnc.cost ? 1 : .3 }}>PAY {FM(randEnc.cost)}</button><button onClick={() => doEncounter(“decline”)} style={bt(C.dim)}>TOO RISKY</button></div>}
+{randEnc.type === “dea_defuse” && <div style={{ display: “flex”, gap: 8, justifyContent: “center” }}><button onClick={() => doEncounter(“accept”)} disabled={g.cash < randEnc.cost} style={{ …bt(C.green), opacity: g.cash >= randEnc.cost ? 1 : .3 }}>PAY {FM(randEnc.cost)}</button><button onClick={() => doEncounter(“decline”)} style={bt(C.dim)}>LET IT PLAY OUT</button></div>}
 {(randEnc.type === “tip” || randEnc.type === “snitch_warning”) && <button onClick={() => doEncounter(“ok”)} style={bt(C.blue)}>GOT IT</button>}
 </div>
 

@@ -287,12 +287,11 @@ Backstory-driven, triggered by flags + thresholds in `processTravel`:
 
 Planted silently, detonate after N moves:
 
-| Timer | Planted When | Fuse | Detonation |
-|-------|-------------|------|------------|
-| `witness` | Deal ≥$15K in public location (Beach/Havana/Gables) | 8 moves | Evidence +3, police sketch |
-| `stash_raid` | Stash value >$30K + heat ≥25 | 6 moves | All stash inventory zeroed |
-
-Defuse: Witness — return and pay $2K (encounter). Stash — empty the stash before timer.
+| Timer | Planted When | Fuse | Detonation | Defuse |
+|-------|-------------|------|------------|--------|
+| `witness` | Deal ≥$15K in public location (Beach/Havana/Gables) | 8 moves | Evidence +3, police sketch | Pay $2K (random encounter, 40% chance/travel) |
+| `dea_surveil` | fedHeat ≥45, profit ≥$80K | 6 moves | fedHeat +12, evidence +2 | Pay $5K (random encounter, 40% chance/travel) |
+| `supplier_N` | 5+ buys at same location + heat ≥20 | 4 moves | Evidence +2, location compromised | Not defusable — diversify suppliers |
 
 ---
 
@@ -308,7 +307,7 @@ Defuse: Witness — return and pay $2K (encounter). Stash — empty the stash be
 - **Narrative openers:** 21 (3 per 7 endings)
 - **Narrative beats:** 13 templates
 - **Newspaper headlines:** 15
-- **Random encounters:** 12
+- **Random encounters:** 14 (12 standard + 2 fuse defuse)
 - **Pager deal templates:** 10
 - **Radio event templates:** 6
 - **Location vibe lines:** 36 (6 locations × 3 day + 3 night)
