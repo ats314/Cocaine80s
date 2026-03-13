@@ -138,135 +138,6 @@ const ENFORCER_UPKEEP = 80;
 const RIVALS_NAMES = [“Rico”,“Alejandra”,“El Gato”,“Scarface Jr.”,“Mama Coco”];
 const MAX_MOVES = 60;
 
-// ═══════════════════════════════════════════════════════════════
-// PLAYBOOKS — Character Classes (NEW!)
-// Each playbook offers a unique starting configuration
-// ═══════════════════════════════════════════════════════════════
-const PLAYBOOKS = [
-{
-id:“hustler”, name:“The Hustler”, icon:“🎲”, color:C.gold,
-desc:“Balanced start. The classic way to play.”,
-mods:{}, // No modifications - baseline
-flavor:“You came to Miami with nothing but ambition.”,
-},
-{
-id:“mule”, name:“The Mule”, icon:“🧳”, color:C.green,
-desc:“Volume play. +40 inventory but start with $3K.”,
-mods:{ startCash:3000, bonusCoat:40 },
-flavor:“You can carry more than anyone. That’s your edge.”,
-},
-{
-id:“connected”, name:“The Connected”, icon:“🤝”, color:C.purple,
-desc:“NPC trust boost. Maria and El Colombiano start friendly.”,
-mods:{ mariaTrust:3, colombianoTrust:2 },
-flavor:“You have friends in low places. And high ones.”,
-},
-{
-id:“enforcer”, name:“The Enforcer”, icon:“👊”, color:C.pink,
-desc:“Turf focus. Start with a corner and 2 enforcers.”,
-mods:{ startTurf:1, startEnforcers:2, turfLoc:2 },
-flavor:“You’re not here to deal. You’re here to own.”,
-},
-{
-id:“smuggler”, name:“The Smuggler”, icon:“🚤”, color:C.blue,
-desc:“Keys bonus. Start in Keys, cheaper boat, +30% import prices.”,
-mods:{ startLoc:5, boatDiscount:0.5, importBonus:0.7 },
-flavor:“You know every inlet from here to Cuba.”,
-},
-{
-id:“banker”, name:“The Banker”, icon:“💰”, color:C.green,
-desc:“Money focus. Start with $8K cash, $5K debt, 2% interest.”,
-mods:{ startCash:8000, startDebt:5000, interestMod:0.25 },
-flavor:“You laundered money on Wall Street. This is a vacation.”,
-},
-{
-id:“ghost”, name:“The Ghost”, icon:“👻”, color:C.dim,
-desc:“Low heat. Cops -30%, but -20% street cred.”,
-mods:{ copsMod:0.7, credMod:0.8, startHeat:-5 },
-flavor:“No one knows your name. That’s the point.”,
-},
-{
-id:“kingpin”, name:“The Kingpin”, icon:“👑”, color:C.gold,
-desc:“High risk. Start with $15K debt, but double cred gains.”,
-mods:{ startDebt:15000, credMultiplier:2, biggerDeals:true },
-flavor:“Go big or go home. You’re not going home.”,
-unlockReq: { totalRep:5000 }, // Must earn 5000 rep to unlock
-},
-];
-
-// ═══════════════════════════════════════════════════════════════
-// SAFEHOUSE UPGRADES — Meta-progression (NEW!)
-// Purchased with Rep, persist across runs
-// ═══════════════════════════════════════════════════════════════
-const SAFEHOUSE_UPGRADES = [
-{ id:“cash1”, name:“Rainy Day Fund”, icon:“💵”, cost:500, maxLevel:3,
-desc:”+$500 starting cash per level”, effect:“startCash”, value:500 },
-{ id:“coat1”, name:“Bigger Coat”, icon:“🧥”, cost:750, maxLevel:3,
-desc:”+15 inventory space per level”, effect:“coatSpace”, value:15 },
-{ id:“heat1”, name:“Cool Connections”, icon:“❄️”, cost:1000, maxLevel:3,
-desc:”-5% police attention per level”, effect:“heatMod”, value:-0.05 },
-{ id:“cred1”, name:“Street Rep”, icon:“⭐”, cost:600, maxLevel:3,
-desc:”+5 starting cred per level”, effect:“startCred”, value:5 },
-{ id:“gun1”, name:“Piece in the Drawer”, icon:“🔫”, cost:2000, maxLevel:1,
-desc:“Start with a gun”, effect:“startGun”, value:true },
-{ id:“phone1”, name:“Pager Network”, icon:“📟”, cost:1500, maxLevel:2,
-desc:”+10% pager deal chance per level”, effect:“pagerChance”, value:0.10 },
-{ id:“moves1”, name:“Time Management”, icon:“⏰”, cost:2500, maxLevel:2,
-desc:”+3 moves per level”, effect:“bonusMoves”, value:3 },
-{ id:“price1”, name:“Market Intel”, icon:“📊”, cost:1200, maxLevel:2,
-desc:”+5% better buy prices per level”, effect:“priceDiscount”, value:0.05 },
-{ id:“legal1”, name:“Smooth Talker”, icon:“🗣️”, cost:800, maxLevel:2,
-desc:”-15% legal fees per level”, effect:“legalFeeMod”, value:-0.15 },
-{ id:“bank1”, name:“Offshore Account”, icon:“🏦”, cost:3000, maxLevel:1,
-desc:“Start with bank unlocked”, effect:“startBank”, value:true },
-];
-
-// ═══════════════════════════════════════════════════════════════
-// DAILY CHALLENGE SYSTEM (NEW!)
-// Seeded runs with modifiers, themed as “Police Case Files”
-// ═══════════════════════════════════════════════════════════════
-const DAILY_MODIFIERS = [
-{ id:“drought”, name:“Supply Drought”, desc:“All prices +40%”, effect:“priceMulti”, value:1.4, icon:“📈” },
-{ id:“flood”, name:“Market Flood”, desc:“All prices -30%”, effect:“priceMulti”, value:0.7, icon:“📉” },
-{ id:“crackdown”, name:“Federal Crackdown”, desc:“Cops +50%”, effect:“copsMod”, value:1.5, icon:“🚔” },
-{ id:“holiday”, name:“Holiday Weekend”, desc:“Demand +60%”, effect:“demandMod”, value:1.6, icon:“🎉” },
-{ id:“heatwave”, name:“Heat Wave”, desc:“Heat decays 50% slower”, effect:“heatDecayMod”, value:0.5, icon:“🌡️” },
-{ id:“recession”, name:“Recession”, desc:“Start with -$2K cash”, effect:“startCashMod”, value:-2000, icon:“💸” },
-{ id:“windfall”, name:“Windfall”, desc:“Start with +$3K cash”, effect:“startCashMod”, value:3000, icon:“🎰” },
-{ id:“paranoia”, name:“Paranoid City”, desc:“All NPCs start hostile”, effect:“npcHostile”, value:true, icon:“👁️” },
-{ id:“goldmine”, name:“Gold Mine”, desc:“Pager deals pay +50%”, effect:“pagerBonus”, value:1.5, icon:“⛏️” },
-{ id:“shortgame”, name:“Speed Run”, desc:“Only 40 moves”, effect:“maxMoves”, value:40, icon:“⚡” },
-];
-
-// Generate daily seed and modifiers
-const getDailySeed = () => {
-const now = new Date();
-const dateStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
-let hash = 0;
-for (let i = 0; i < dateStr.length; i++) {
-hash = ((hash << 5) - hash) + dateStr.charCodeAt(i);
-hash = hash & hash;
-}
-return { seed: Math.abs(hash), dateStr, caseNumber: `1980-${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}` };
-};
-
-const getDailyModifiers = (seed) => {
-// Use seed to pick 2-3 modifiers
-const rng = (s) => { s = Math.sin(s) * 10000; return s - Math.floor(s); };
-const count = 2 + (rng(seed) > 0.6 ? 1 : 0);
-const shuffled = […DAILY_MODIFIERS].sort(() => rng(seed++) - 0.5);
-return shuffled.slice(0, count);
-};
-
-// Seeded RNG for daily challenges
-class SeededRNG {
-constructor(seed) { this.seed = seed; }
-next() {
-this.seed = (this.seed * 1103515245 + 12345) & 0x7fffffff;
-return this.seed / 0x7fffffff;
-}
-nextInt(min, max) { return Math.floor(this.next() * (max - min + 1)) + min; }
-}
 
 // ── COACH MARKS — Contextual hints that teach by doing ──
 const COACH_MARKS = [
@@ -537,17 +408,6 @@ colombiano: { name:“El Colombiano”, icon:“🇨🇴”, desc:“Criminal ri
 ramirez: { name:“Det. Ramirez”, icon:“🕵️”, desc:“Building a case against you.” },
 maria: { name:“Maria Santos”, icon:“💃”, desc:“Connected socialite. Insider info.” },
 };
-
-// ── HEAT LADDER ──
-const HEAT_LADDER = [
-{ level:0, name:“Tourist”, mods:“Standard game”, copsMod:1, priceMod:1, startCash:5000, startDebt:8000 },
-{ level:1, name:“Corner Boy”, mods:“Cops +15%”, copsMod:1.15, priceMod:1, startCash:5000, startDebt:8000 },
-{ level:2, name:“Hustler”, mods:“Cops +25%, prices swing wider”, copsMod:1.25, priceMod:1.15, startCash:4500, startDebt:8000 },
-{ level:3, name:“Dealer”, mods:“Cops +40%, start with less cash”, copsMod:1.4, priceMod:1.2, startCash:3500, startDebt:8000 },
-{ level:4, name:“Supplier”, mods:“Cops +60%, more debt, wilder prices”, copsMod:1.6, priceMod:1.3, startCash:3000, startDebt:10000 },
-{ level:5, name:“Kingpin”, mods:“Everything stacked against you”, copsMod:2.0, priceMod:1.5, startCash:2000, startDebt:12000 },
-{ level:6, name:“Scarface”, mods:“One mistake and it’s over”, copsMod:2.5, priceMod:1.7, startCash:1500, startDebt:15000 },
-];
 
 // ═══════════════════════════════════════════════════════════════
 // NARRATIVE ENGINE — Quality-Based Storylet System
@@ -1075,188 +935,9 @@ else if (k.startsWith(‘npc.’)) { const p=k.split(’.’); ns.npcState={…n
 }
 return ns;
 };
-// ═══════════════════════════════════════════════════════════════
-// META-PROGRESSION STATE (Persists across runs)
-// ═══════════════════════════════════════════════════════════════
-const DEFAULT_META = {
-totalRep: 0,
-lifetimeRep: 0,
-upgrades: {}, // { upgradeId: level }
-unlockedPlaybooks: [“hustler”], // Hustler always unlocked
-completionGrid: {}, // { “playbook-heat”: bestScore }
-dailyBests: {}, // { “YYYY-MM-DD”: score }
-runsCompleted: 0,
-bestScore: 0,
-};
 
-const loadMeta = () => {
-try {
-const saved = localStorage.getItem(‘cocaine80s_meta’);
-if (saved) return { …DEFAULT_META, …JSON.parse(saved) };
-} catch (e) {}
-return { …DEFAULT_META };
-};
-
-const saveMeta = (meta) => {
-try {
-localStorage.setItem(‘cocaine80s_meta’, JSON.stringify(meta));
-} catch (e) {}
-};
-
-// Calculate rep earned from a run
-const calcRepEarned = (g, finalNW, heatLevel, playbook, isDaily) => {
-let rep = 0;
-
-// Base rep from net worth
-rep += Math.floor(finalNW / 1000);
-
-// Bonus for heat level
-rep *= (1 + heatLevel * 0.2);
-
-// Bonus for achievements
-rep += g.achievements.length * 50;
-
-// Bonus for streaks
-rep += g.bestStreak * 10;
-
-// Bonus for completing the run (not dying)
-if (g.hp > 0) rep += 200;
-
-// Bonus for paying off debt
-if (g.debt <= 0) rep += 300;
-
-// Daily challenge bonus
-if (isDaily) rep *= 1.5;
-
-// Playbook mastery bonus (first time with this playbook+heat combo)
-// This is handled in the calling code
-
-return Math.floor(rep);
-};
-
-// Apply safehouse upgrades to initial state
-const applySafehouseUpgrades = (baseState, upgrades) => {
-let state = { …baseState };
-
-for (const [id, level] of Object.entries(upgrades)) {
-if (level <= 0) continue;
-const upgrade = SAFEHOUSE_UPGRADES.find(u => u.id === id);
-if (!upgrade) continue;
-
-```
-const totalValue = upgrade.value * level;
-
-switch (upgrade.effect) {
-  case 'startCash':
-    state.cash += totalValue;
-    break;
-  case 'coatSpace':
-    state.coatSp += totalValue;
-    break;
-  case 'heatMod':
-    state.safehouseHeatMod = (state.safehouseHeatMod || 0) + totalValue;
-    break;
-  case 'startCred':
-    state.cred += totalValue;
-    break;
-  case 'startGun':
-    state.gun = true;
-    break;
-  case 'pagerChance':
-    state.pagerChanceMod = (state.pagerChanceMod || 0) + totalValue;
-    break;
-  case 'bonusMoves':
-    state.bonusMoves = (state.bonusMoves || 0) + totalValue;
-    break;
-  case 'priceDiscount':
-    state.priceDiscount = (state.priceDiscount || 0) + totalValue;
-    break;
-  case 'legalFeeMod':
-    state.legalFeeMod = (state.legalFeeMod || 0) + totalValue;
-    break;
-  case 'startBank':
-    state.bankUnlocked = true;
-    break;
-}
-```
-
-}
-
-return state;
-};
-
-// Apply playbook modifiers to initial state
-const applyPlaybookMods = (baseState, playbook) => {
-if (!playbook || !playbook.mods) return baseState;
-let state = { …baseState };
-const mods = playbook.mods;
-
-if (mods.startCash) state.cash = mods.startCash;
-if (mods.startDebt) state.debt = mods.startDebt;
-if (mods.startLoc !== undefined) state.loc = mods.startLoc;
-if (mods.mariaTrust) state.npcState.maria.trust = mods.mariaTrust;
-if (mods.colombianoTrust) state.npcState.colombiano.trust = mods.colombianoTrust;
-if (mods.startTurf) {
-const loc = mods.turfLoc || 0;
-state.turf[loc] = mods.startTurf;
-}
-if (mods.startEnforcers) {
-const loc = mods.turfLoc || 0;
-state.enforcers[loc] = mods.startEnforcers;
-}
-if (mods.copsMod) state.playbookCopsMod = mods.copsMod;
-if (mods.credMod) state.playbookCredMod = mods.credMod;
-if (mods.credMultiplier) state.credMultiplier = mods.credMultiplier;
-if (mods.interestMod) state.interestMod = mods.interestMod;
-if (mods.bonusCoat) state.coatSp += mods.bonusCoat;
-if (mods.boatDiscount) state.boatDiscount = mods.boatDiscount;
-if (mods.importBonus) state.importBonus = mods.importBonus;
-if (mods.startHeat) state.fedHeat = Math.max(0, state.fedHeat + mods.startHeat);
-
-return state;
-};
-
-// Apply daily modifiers
-const applyDailyMods = (baseState, modifiers) => {
-if (!modifiers || modifiers.length === 0) return baseState;
-let state = { …baseState };
-
-for (const mod of modifiers) {
-switch (mod.effect) {
-case ‘startCashMod’:
-state.cash = Math.max(500, state.cash + mod.value);
-break;
-case ‘copsMod’:
-state.dailyCopsMod = mod.value;
-break;
-case ‘priceMulti’:
-state.dailyPriceMulti = mod.value;
-break;
-case ‘demandMod’:
-state.dailyDemandMod = mod.value;
-break;
-case ‘heatDecayMod’:
-state.dailyHeatDecayMod = mod.value;
-break;
-case ‘npcHostile’:
-state.npcState.maria.trust = -3;
-state.npcState.colombiano.trust = -3;
-break;
-case ‘pagerBonus’:
-state.dailyPagerBonus = mod.value;
-break;
-case ‘maxMoves’:
-state.dailyMaxMoves = mod.value;
-break;
-}
-}
-
-return state;
-};
-
-// ── INITIAL STATE FACTORY (Updated for meta-progression) ──
-const createInitialState = (heatLevel = 0, playbook = null, dailyMods = null, safehouseUpgrades = {}) => {
-const hl = HEAT_LADDER[heatLevel] || HEAT_LADDER[0];
+// ── INITIAL STATE FACTORY ──
+const createInitialState = () => {
 const bp = initBasePrices();
 const ip = getStreetPrices(bp, 0, ERAS[0].demandMod, Array(DRUG_COUNT).fill(1));
 // Semi-script: make one mid-tier drug obviously cheap so first trade feels smart
@@ -1265,13 +946,13 @@ ip[4] = R(12, 16);
 // And make it expensive somewhere else by adjusting base price momentum
 bp[4] = DRUGS[4].mean * 0.6; // Low base = will mean-revert UP at next location
 
-let baseState = {
-move: 0, cash: 200, debt: hl.startDebt, bank: 0, cleanCash: 0, hp: 100, loc: 0,
+return {
+move: 0, cash: 200, debt: 8000, bank: 0, cleanCash: 0, hp: 100, loc: 0,
 inv: Array(DRUG_COUNT).fill(0), avgC: Array(DRUG_COUNT).fill(0), coatSp: 100,
 prices: ip, hist: ip.map(p => [p]), basePrices: bp, momentum: initMomentum(),
-cred: 0, fedHeat: 0, gun: false, heatLevel,
+cred: 0, fedHeat: 0, gun: false,
 rivals: RIVALS_NAMES.slice(0, 3).map(n => ({ name: n, loc: R(0, 5), rep: R(0, 15) })),
-lifestyle: [], safeHouses: Array(6).fill(-1), stashInv: Array(DRUG_COUNT).fill(0),
+lifestyle: [], safeHouses: Array(6).fill(-1),
 turf: Array(6).fill(0), enforcers: Array(6).fill(0), demand: Array(DRUG_COUNT).fill(1),
 achievements: [], montage: [], nwHist: [0], evtMsg: null, scores: [],
 streak: 0, bestStreak: 0,
@@ -1297,18 +978,7 @@ supplierHistory: {},     // { locIdx: buyCount } for betrayal triggers
 activeDeal: null,        // { step:0-3, drugIdx, qty, cost, targetLoc, altDropPaid, rivalBought, movePlanted }
 // Defusable fuse timers (planted consequences)
 fuseTimers: [],          // [{ id, movePlanted, fuseLength, defused }]
-// New meta-progression fields
-playbook: playbook?.id || ‘hustler’,
-isDaily: !!dailyMods,
-bonusMoves: 0,
 };
-
-// Apply upgrades in order
-baseState = applySafehouseUpgrades(baseState, safehouseUpgrades);
-if (playbook) baseState = applyPlaybookMods(baseState, playbook);
-if (dailyMods) baseState = applyDailyMods(baseState, dailyMods);
-
-return baseState;
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -1334,14 +1004,12 @@ evtDrug = dr.name; evtType = e.type; evtMulti = e.m;
 // Evolve economy
 const newMom = evolveMomentum(s.momentum);
 const newBase = evolveBasePrices(s.basePrices, newMom, evtDrug, evtType, evtMulti);
-const priceMulti = s.dailyPriceMulti || 1;
-const np = getStreetPrices(newBase, destLoc, era.demandMod, s.demand, priceMulti);
+const np = getStreetPrices(newBase, destLoc, era.demandMod, s.demand);
 const newHist = s.hist.map((h, i) => […h.slice(-7), np[i]]);
 
 // Heat (with passive decay and safehouse mods)
 const sh = s.safeHouses[destLoc];
 let heatDecay = sh >= 0 ? SAFE_HOUSES[sh].heatDecay : 0;
-if (s.dailyHeatDecayMod) heatDecay *= s.dailyHeatDecayMod;
 const passiveDecay = usedSp === 0 ? 2 : 0;
 const hc = usedSp > 50 ? 4 : usedSp > 20 ? 2 : usedSp > 0 ? 0 : -1;
 // Heat floor: rises with career activity — you can never fully cool off
@@ -1350,14 +1018,10 @@ const nh = CL(Math.max(s.fedHeat + hc - heatDecay - passiveDecay, heatFloor), 0,
 
 if (nh > 20) effects.push({ type: ‘SYNTH_PULSE’, heat: nh });
 
-// Police check (with playbook and daily mods)
-const hl = HEAT_LADDER[s.heatLevel || 0] || HEAT_LADDER[0];
-const playbookCopsMod = s.playbookCopsMod || 1;
-const dailyCopsMod = s.dailyCopsMod || 1;
-const safehouseHeatMod = 1 + (s.safehouseHeatMod || 0);
+// Police check
 // Success tax: wealth makes you a bigger target
 const wealthMod = s.cash >= 500000 ? 1.6 : s.cash >= 250000 ? 1.4 : s.cash >= 100000 ? 1.2 : 1;
-const policeEff = LOCS[destLoc].heat * 0.5 * era.copsMod * hl.copsMod * playbookCopsMod * dailyCopsMod * safehouseHeatMod * (1 + nh / 300) * (isNight ? 1.2 : 1) * wealthMod;
+const policeEff = LOCS[destLoc].heat * 0.5 * era.copsMod * (1 + nh / 300) * (isNight ? 1.2 : 1) * wealthMod;
 
 if (Math.random() < policeEff && usedSp > 0) {
 effects.push({ type: ‘SFX’, name: ‘police’ }, { type: ‘SCREEN’, screen: ‘police’ });
@@ -1377,10 +1041,9 @@ const launder = Math.min(2000, cash);
 if (launder > 0) { cash -= launder; cleanCash += launder; }
 }
 
-// Interest (with playbook mod)
 let debt = s.debt, bank = s.bank;
 // Interest scales with debt — Tiburón charges more as you owe more
-const baseInterest = s.interestMod ? 0.08 * s.interestMod : 0.08;
+const baseInterest = 0.08;
 const debtPenalty = debt >= 30000 ? 0.06 : debt >= 20000 ? 0.04 : debt >= 10000 ? 0.02 : 0;
 const interestRate = 1 + baseInterest + debtPenalty;
 if (nm % 4 === 0 && debt > 0) debt = Math.floor(debt * interestRate);
@@ -1465,9 +1128,8 @@ usedFailureBonus = true;
 }
 
 // Demand decay — moderate recovery preserves location price differentiation
-const dailyDemandMod = s.dailyDemandMod || 1;
 const careerSaturation = Math.max(0.75, 1 - (s.totalDeals||0) * 0.001); // gentler: floor at 0.75 after 250 deals
-const newDemand = s.demand.map(v => Math.max(0.4, (v + (1 - v) * .20) * dailyDemandMod * careerSaturation));
+const newDemand = s.demand.map(v => Math.max(0.4, (v + (1 - v) * .20) * careerSaturation));
 
 // Newspaper
 let newspaper = null;
@@ -1489,13 +1151,12 @@ else randEnc = { …enc };
 
 // Pager deal (with safehouse mod)
 let pagerDeal = null;
-const basePagerChance = 0.12 + (s.pagerChanceMod || 0);
+const basePagerChance = 0.12;
 if (Math.random() < basePagerChance && nm > 5) {
 const pd = PAGER_DEALS[R(0, PAGER_DEALS.length - 1)];
 const drugIdx = R(0, DRUG_COUNT - 1);
 const qty = R(pd.qty[0], pd.qty[1]);
-let bonusPct = Math.round((RF(pd.bonus[0], pd.bonus[1]) - 1) * 100);
-if (s.dailyPagerBonus) bonusPct = Math.round(bonusPct * s.dailyPagerBonus);
+const bonusPct = Math.round((RF(pd.bonus[0], pd.bonus[1]) - 1) * 100);
 const targetLoc = R(0, 5);
 pagerDeal = {
 drugIdx, qty, bonusPct, targetLoc,
@@ -1657,12 +1318,6 @@ fuseTimers.push({ id: ‘witness’, movePlanted: nm, fuseLength: 8, defused: fa
 // No message — the player doesn’t know the fuse is lit
 }
 
-// Plant: Stash raid fuse — large stash + high heat
-const stashValue = s.stashInv.reduce((sum, q, i) => sum + q * (s.prices[i]||0), 0);
-if (stashValue > 30000 && nh >= 25 && !fuseTimers.some(f => f.id === ‘stash_raid’) && !s.storyFlags?.stash_raided) {
-fuseTimers.push({ id: ‘stash_raid’, movePlanted: nm, fuseLength: 6, defused: false });
-}
-
 // Detonate fuses
 fuseTimers = fuseTimers.map(f => {
 if (f.defused || nm < f.movePlanted + f.fuseLength) return f;
@@ -1672,19 +1327,12 @@ if (!evtMsg) evtMsg = “🕵️ A witness from your deal talked. Police sketch 
 npcState.ramirez.evidence = Math.min(20, (npcState.ramirez.evidence||0) + 3);
 return { …f, defused: true };
 }
-if (f.id === ‘stash_raid’ && !s.storyFlags?.stash_raided) {
-if (!evtMsg) evtMsg = “🚔 RAID! Your stash house got hit. Everything inside — gone.”;
-effects.push({ type: ‘SHAKE’ }, { type: ‘FLASH’, color: C.pink + ‘66’ });
-// stashInv will be zeroed in return
-return { …f, defused: true, payload: ‘zero_stash’ };
-}
 return f;
 });
 
 // Check for defuse opportunities:
 // Witness defuse: return to the deal location and pay $2K
 // (handled via encounter system — the opportunity appears as a random event)
-// Stash defuse: move product out before timer (player agency — just empty the stash)
 
 // ── SUPPLIER BETRAYAL — same source too many times + heat ──
 const supplierCount = (s.supplierHistory||{})[destLoc] || 0;
@@ -1789,12 +1437,8 @@ finalInv = activeDeal.newInv;
 activeDeal = null; // Clear after resolution
 }
 // Handle stash raid
-let finalStash = s.stashInv;
-const stashRaided = fuseTimers.some(f => f.payload === ‘zero_stash’ && f.defused);
-if (stashRaided) finalStash = Array(DRUG_COUNT).fill(0);
-// Track stash/witness/supplier/failure flags
+// Track witness/supplier/failure flags
 const newFlags = { …(s.storyFlags||{}) };
-if (stashRaided) newFlags.stash_raided = true;
 if (fuseTimers.some(f => f.id === ‘witness’ && f.defused)) newFlags.witness_fired = true;
 if (usedFailureBonus) newFlags.got_failure_bonus = true;
 if (supplierFlipped) newFlags[`supplier_flipped_${destLoc}`] = true;
@@ -1804,7 +1448,7 @@ state: {
 …s, loc: destLoc, move: nm, cash, debt, bank, cleanCash, prices: np, hist: newHist,
 basePrices: newBase, momentum: newMom, fedHeat: nh, evtMsg, rivals: newRivals,
 demand: newDemand, achievements: achs, npcState, hp: Math.max(0, s.hp + hpDelta),
-inv: finalInv, stashInv: finalStash, storyFlags: newFlags,
+inv: finalInv, storyFlags: newFlags,
 pagerDeal: activePager, fuseChains,
 activeDeal, fuseTimers: fuseTimers.filter(f => !f.defused), // Clean up detonated fuses
 nwHist: […s.nwHist, nw].slice(-30),
@@ -1819,19 +1463,15 @@ effects, turfWar, newspaper, randEnc, npcEvent, dealEvent,
 
 function processBuyDrug(s, idx, amt) {
 const price = s.prices[idx];
-const priceDiscount = 1 - (s.priceDiscount || 0);
-const finalPrice = Math.floor(price * priceDiscount);
-const cost = amt * finalPrice;
+const cost = amt * price;
 const usedSp = s.inv.reduce((a, b) => a + b, 0);
 const freeSp = s.coatSp - usedSp;
 const era = getEra(s);
 if (cost > s.cash || amt > freeSp || amt <= 0) return { state: s, ok: false, effects: [{ type: ‘SHAKE’ }] };
 
-const playbookCopsMod = s.playbookCopsMod || 1;
-const dailyCopsMod = s.dailyCopsMod || 1;
-const risk = calcTxRisk(amt, LOCS[s.loc].heat, era.copsMod * playbookCopsMod * dailyCopsMod * (1 + s.fedHeat / 200));
+const risk = calcTxRisk(amt, LOCS[s.loc].heat, era.copsMod * (1 + s.fedHeat / 200));
 if (Math.random() < risk) {
-const fees = Math.floor(calcLegalFees(cost, era.penaltyMod) * (1 + (s.legalFeeMod || 0)));
+const fees = Math.floor(calcLegalFees(cost, era.penaltyMod));
 const totalLoss = cost + fees;
 let cash = s.cash, debt = s.debt;
 if (totalLoss > cash) { debt += totalLoss - cash; cash = 0; }
@@ -1851,7 +1491,7 @@ const oldQ = s.inv[i], newQ = oldQ + amt;
 return Math.floor((a * oldQ + finalPrice * amt) / newQ);
 });
 
-const credMulti = s.credMultiplier || 1;
+const credMulti = 1;
 // Track supplier history for betrayal triggers
 const newSupplierHist = { …(s.supplierHistory||{}), [s.loc]: ((s.supplierHistory||{})[s.loc]||0) + 1 };
 return {
@@ -1873,12 +1513,10 @@ price = Math.round(price * (1 + s.pagerDeal.bonusPct / 100));
 pagerBonus = true;
 }
 
-const playbookCopsMod = s.playbookCopsMod || 1;
-const dailyCopsMod = s.dailyCopsMod || 1;
-const risk = calcTxRisk(amt, LOCS[s.loc].heat, era.copsMod * playbookCopsMod * dailyCopsMod * (1 + s.fedHeat / 200)) * 0.6;
+const risk = calcTxRisk(amt, LOCS[s.loc].heat, era.copsMod * (1 + s.fedHeat / 200)) * 0.6;
 if (Math.random() < risk) {
 const txVal = amt * price;
-const fees = Math.floor(calcLegalFees(txVal, era.penaltyMod) * (1 + (s.legalFeeMod || 0)));
+const fees = Math.floor(calcLegalFees(txVal, era.penaltyMod));
 const newInv = s.inv.map((q, i) => i === idx ? q - amt : q);
 let cash = s.cash, debt = s.debt;
 if (fees > cash) { debt += fees - cash; cash = 0; } else cash -= fees;
@@ -1942,7 +1580,7 @@ newPagerDeal = null;
 effects.push({ type: ‘SPAWN’, text: “📟 PAGER DEAL COMPLETE!”, color: C.gold, delay: 1000, size: 12 });
 }
 
-const credMulti = s.credMultiplier || 1;
+const credMulti = 1;
 // Big sales generate evidence — the streets talk
 let sellNpcState = s.npcState;
 if (rev > 10000 && s.npcState?.ramirez?.met) {
@@ -2097,8 +1735,7 @@ function processBuyLifestyle(s, effect) {
 const item = LIFESTYLE.find(l => l.effect === effect);
 if (!item || s.cash < item.cost || s.lifestyle.includes(effect)) return { state: s, ok: false };
 
-let actualCost = item.cost;
-if (effect === “boat” && s.boatDiscount) actualCost = Math.floor(actualCost * s.boatDiscount);
+const actualCost = item.cost;
 if (s.cash < actualCost) return { state: s, ok: false };
 
 let cred = s.cred;
@@ -2541,11 +2178,8 @@ return C.text;
 // MAIN GAME COMPONENT
 // ═══════════════════════════════════════════════════════════════
 export default function Cocaine80s() {
-// Meta-progression state (persists across runs)
-const [meta, setMeta] = useState(() => loadMeta());
-
 // Game state
-const [g, setG] = useState(() => createInitialState(0));
+const [g, setG] = useState(() => createInitialState());
 const [screen, setScreen] = useState(“title”);
 const [tab, setTab] = useState(“market”);
 const [selDrug, setSelDrug] = useState(null);
@@ -2575,7 +2209,6 @@ const [streakBorder, setStreakBorder] = useState(false);
 const [eraTransition, setEraTransition] = useState(null);
 const [comicIdx, setComicIdx] = useState(0);
 const [scores, setScores] = useState([]);
-const [repEarned, setRepEarned] = useState(0);
 // Narrative dialogue state
 
 const pid = useRef(0);
@@ -2592,12 +2225,12 @@ const ownedTurfCount = g.turf.filter(l => l > 0).length;
 
 // Feature unlocks
 const UL = useMemo(() => ({
-bank: g.achievements.includes(“first_sale”) || meta.upgrades.bank1 > 0,
+bank: g.achievements.includes(“first_sale”),
 safe: g.achievements.includes(“10k”),
 empire: g.achievements.includes(“debt_free”) || ownedTurfCount > 0,
 lifestyle: g.achievements.includes(“debt_free”) || g.cred >= 15,
 club: isNight && g.achievements.includes(“first_sale”),
-}), [g.achievements, g.cred, isNight, ownedTurfCount, meta.upgrades]);
+}), [g.achievements, g.cred, isNight, ownedTurfCount]);
 
 const visibleTabs = useMemo(() => {
 const tabs = [[“market”, isNight ? “🌙 Night” : “☀️ Market”], [“bag”, “🎒 Bag”], [“travel”, “🚗 Travel”]];
@@ -2672,22 +2305,8 @@ else if (fx.type === “SPAWN”) setTimeout(() => spawn(fx.text, null, fx.y, fx
 else if (fx.type === “SCREEN”) setScreen(fx.screen);
 else if (fx.type === “GAME_OVER”) {
 const finalNW = Math.max(0, nw);
-const rep = calcRepEarned(g, finalNW, g.heatLevel, PLAYBOOKS.find(p => p.id === g.playbook), g.isDaily);
-setRepEarned(rep);
 setScores(p => […p, finalNW].sort((a, b) => b - a).slice(0, 5));
 setG(prev => ({ …prev, ending: fx.ending || ‘unknown’ }));
-// Persist meta-progression
-setMeta(prev => {
-const updated = {
-…prev,
-totalRep: (prev.totalRep || 0) + rep,
-lifetimeRep: (prev.lifetimeRep || 0) + rep,
-runsCompleted: (prev.runsCompleted || 0) + 1,
-bestScore: Math.max(prev.bestScore || 0, finalNW),
-};
-saveMeta(updated);
-return updated;
-});
 // Broke ending gets a choice screen first
 if (fx.ending === ‘broke’) setScreen(“broke_choice”);
 else setScreen(“gameover”);
@@ -2757,7 +2376,7 @@ return result;
 // Start game
 const startGame = () => {
 startAudio();
-const newState = createInitialState(0, PLAYBOOKS[0], null, meta.upgrades);
+const newState = createInitialState();
 setG(newState);
 setScreen(“comic”);
 setTab(“market”);
@@ -3127,16 +2746,12 @@ const hoffmanSafe = g.storyFlags?.hoffman_cooperated;
 const doEscape = () => {
   setG(prev => ({ ...prev, ending: 'escape', montage: [...prev.montage, { move: prev.move, text: `Escaped to the Caymans with ${FM(prev.cleanCash)} clean.` }] }));
   const finalNW = Math.max(0, nw);
-  const rep = calcRepEarned(g, finalNW, g.heatLevel, PLAYBOOKS.find(p => p.id === g.playbook), g.isDaily);
-  setRepEarned(rep);
   setScores(p => [...p, finalNW].sort((a, b) => b - a).slice(0, 5));
   setScreen("gameover");
 };
 const doKingpin = () => {
   setG(prev => ({ ...prev, ending: 'kingpin', montage: [...prev.montage, { move: prev.move, text: `Crowned kingpin of Miami.` }] }));
   const finalNW = Math.max(0, nw);
-  const rep = calcRepEarned(g, finalNW, g.heatLevel, PLAYBOOKS.find(p => p.id === g.playbook), g.isDaily);
-  setRepEarned(Math.floor(rep * 1.5)); // Kingpin bonus
   setScores(p => [...p, finalNW].sort((a, b) => b - a).slice(0, 5));
   setScreen("gameover");
 };
@@ -3233,8 +2848,6 @@ return <div style={{ ...ctr, background: isWin ? `linear-gradient(180deg, ${C.mi
     </div>
     
     <div style={{ marginBottom: 20 }}><Neon color={ec.color} size={22}>NET WORTH: {FM(finalNW)}</Neon></div>
-    
-    {repEarned > 0 && <div style={{ fontSize: 10, color: C.gold, marginBottom: 12, fontFamily: ft }}>+{repEarned} REP EARNED</div>}
     
     <button onClick={endRun} style={{ ...bt(ec.color, ec.color), fontSize: 14, padding: "14px 48px", letterSpacing: 3, boxShadow: `0 0 20px ${ec.color}44` }}>PLAY AGAIN</button>
   </div>
@@ -3610,8 +3223,7 @@ return <div style={{ …ctr, paddingBottom: 0, display: “flex”, flexDirectio
   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
     {LIFESTYLE.map(item => {
       const owned = g.lifestyle.includes(item.effect);
-      let displayCost = item.cost;
-      if (item.effect === "boat" && g.boatDiscount) displayCost = Math.floor(displayCost * g.boatDiscount);
+      const displayCost = item.cost;
       return <button key={item.effect} onClick={() => !owned && doBuyLife(item.effect)} disabled={owned || g.cash < displayCost}
         style={{ ...bt(owned ? C.green : C.flamingo), padding: "10px 8px", opacity: owned ? .6 : g.cash >= displayCost ? 1 : .5, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
         <span style={{ fontSize: 24 }}>{item.icon}</span>
