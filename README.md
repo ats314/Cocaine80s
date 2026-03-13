@@ -117,6 +117,16 @@ Built into the engine but not yet exposed in UI:
 - **Daily Challenges** — Seeded runs with modifiers
 - **Completion Grid** — Track every playbook × heat level combination
 
+## Documentation
+
+| File | Purpose |
+|------|---------|
+| [CLAUDE.md](CLAUDE.md) | Agent onboarding guide — conventions, how-tos, common pitfalls |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Code map with line numbers, state shape, all functions, data flow |
+| [NARRATIVE.md](NARRATIVE.md) | All storylets, NPC arcs, dialogue catalog, endings, content map |
+| [GAMEPLAY.md](GAMEPLAY.md) | Mechanics reference — formulas, balance parameters, tuning guide |
+| [REVIEW.md](REVIEW.md) | Technical review with known bugs and recommendations |
+
 ## Known Issues
 
 See [REVIEW.md](REVIEW.md) for a detailed technical review including critical bugs and architecture recommendations.
