@@ -1012,8 +1012,9 @@ if (k===‘moveGte’ && s.move<v) return false;
 if (k===‘moveLte’ && s.move>v) return false;
 if (k===‘flashGte’ && q.flash<v) return false;
 if (k===‘flashLte’ && q.flash>v) return false;
-if (k===‘heatGte’ && s.fedHeat<v) return false;
-if (k===‘heatLte’ && s.fedHeat>v) return false;
+if (k===’heatGte’ && s.fedHeat<v) return false;
+if (k===’fedHeatGte’ && s.fedHeat<v) return false;
+if (k===’heatLte’ && s.fedHeat>v) return false;
 if (k===‘credGte’ && s.cred<v) return false;
 if (k===‘credLte’ && s.cred>v) return false;
 if (k===‘cashGte’ && s.cash<v) return false;
@@ -1451,7 +1452,8 @@ effects.push({ type: ‘SPAWN’, text: `-${FM(shakedown)}`, color: C.pink, size
 }
 }
 
-// ── FAILURE BONUS — mercy for struggling players ──
+// ── FAILURE BONUS — mercy for struggling players (one-time) ──
+let usedFailureBonus = false;
 if (cash <= 2000 && (s.totalProfit||0) >= 5000 && debt > 0 && !s.storyFlags?.got_failure_bonus) {
 // One-time lifeline: cheap product appears
 const cheapDrug = R(0, DRUG_COUNT-1);
@@ -1459,6 +1461,7 @@ const cheapAmt = R(5, 15);
 if (!evtMsg) evtMsg = `A desperate dealer dumps ${cheapAmt}x ${DRUGS[cheapDrug].name} at half price. Grab it while you can.`;
 // Halve the price of a random drug at current location
 np[cheapDrug] = Math.max(DRUGS[cheapDrug].min, Math.floor(np[cheapDrug] * 0.4));
+usedFailureBonus = true;
 }
 
 // Demand decay — moderate recovery preserves location price differentiation
@@ -1685,11 +1688,12 @@ return f;
 
 // ── SUPPLIER BETRAYAL — same source too many times + heat ──
 const supplierCount = (s.supplierHistory||{})[destLoc] || 0;
+let supplierFlipped = false;
 if (supplierCount >= 5 && nh >= 20 && !s.storyFlags?.[`supplier_flipped_${destLoc}`] && Math.random() < 0.3) {
 if (!evtMsg) evtMsg = `🐀 Your regular connect in ${LOCS[destLoc].name} got flipped. Deals here carry a sting risk now.`;
 npcState.ramirez.evidence = Math.min(20, (npcState.ramirez.evidence||0) + 2);
 effects.push({ type: ‘SHAKE’ });
-// Flag it so it only fires once per location
+supplierFlipped = true;
 }
 
 // Achievements
@@ -1788,11 +1792,12 @@ activeDeal = null; // Clear after resolution
 let finalStash = s.stashInv;
 const stashRaided = fuseTimers.some(f => f.payload === ‘zero_stash’ && f.defused);
 if (stashRaided) finalStash = Array(DRUG_COUNT).fill(0);
-// Track stash/witness/supplier flags
+// Track stash/witness/supplier/failure flags
 const newFlags = { …(s.storyFlags||{}) };
 if (stashRaided) newFlags.stash_raided = true;
 if (fuseTimers.some(f => f.id === ‘witness’ && f.defused)) newFlags.witness_fired = true;
-if (supplierCount >= 5 && nh >= 20 && !s.storyFlags?.[`supplier_flipped_${destLoc}`]) newFlags[`supplier_flipped_${destLoc}`] = true;
+if (usedFailureBonus) newFlags.got_failure_bonus = true;
+if (supplierFlipped) newFlags[`supplier_flipped_${destLoc}`] = true;
 
 return {
 state: {
@@ -1851,7 +1856,7 @@ const credMulti = s.credMultiplier || 1;
 const newSupplierHist = { …(s.supplierHistory||{}), [s.loc]: ((s.supplierHistory||{})[s.loc]||0) + 1 };
 return {
 state: { …s, cash: s.cash - cost, inv: newInv, avgC: newAvgC, cred: Math.min(100, s.cred + credMulti), fedHeat: Math.min(100, s.fedHeat + Math.ceil(amt / 30)),
-totalDeals: (s.totalDeals||0) + 1, supplierHistory: newSupplierHist },
+totalDeals: (s.totalDeals||0) + 1, dealsSinceLastEvent: (s.dealsSinceLastEvent||0) + 1, supplierHistory: newSupplierHist },
 ok: true, cost,
 effects: [{ type: ‘SFX’, name: ‘buy’ }, { type: ‘SPAWN’, text: `-${FM(cost)}`, color: C.pink }],
 };
@@ -1946,7 +1951,7 @@ sellNpcState = { …s.npcState, ramirez: { …s.npcState.ramirez, evidence: Math
 return {
 state: { …s, cash: s.cash + rev, inv: newInv, demand: newDemand, cred: Math.min(100, s.cred + (prof > 0 ? 2 * credMulti : credMulti)),
 achievements: achs, streak: newStreak, bestStreak, biggestDeal, totalProfit: s.totalProfit + (prof > 0 ? prof : 0),
-totalDeals: (s.totalDeals||0) + 1, npcState: sellNpcState,
+totalDeals: (s.totalDeals||0) + 1, dealsSinceLastEvent: (s.dealsSinceLastEvent||0) + 1, npcState: sellNpcState,
 pagerDeal: newPagerDeal,
 tradeHistory: […(s.tradeHistory||[]), { drug:idx, qty:amt, loc:s.loc, move:s.move, prof }].slice(-30),
 montage: isBig ? […s.montage, { move: s.move, text: `Big score: ${FM(prof)} on ${DRUGS[idx].name}` }] : s.montage },
@@ -2229,11 +2234,13 @@ const freq = sc.root * Math.pow(2, semitone / 12);
   }
 
   this.step++;
-} catch (e) { }
-
-const sc = SYNTH_SCALES[this.era] || SYNTH_SCALES.Paradise;
-const beatMs = Math.floor(60000 / (sc.bpm + Math.min(this.heat / 100, 1) * 15));
-this.timer = setTimeout(() => this._loop(), beatMs);
+  this.timer = setTimeout(() => this._loop(), beatMs);
+} catch (e) {
+  // Fallback scheduling if audio fails
+  const fbSc = SYNTH_SCALES[this.era] || SYNTH_SCALES.Paradise;
+  const fbBeat = Math.floor(60000 / (fbSc.bpm + Math.min(this.heat / 100, 1) * 15));
+  this.timer = setTimeout(() => this._loop(), fbBeat);
+}
 ```
 
 }
@@ -2561,6 +2568,7 @@ const [newspaper, setNewspaper] = useState(null);
 const [randEnc, setRandEnc] = useState(null);
 const [turfWar, setTurfWar] = useState(null);
 const [npcEvent, setNpcEvent] = useState(null);
+const [policeResultText, setPoliceResultText] = useState("");
 const [dealEvt, setDealEvt] = useState(null); // Poker deal step events
 const [saleBreakdown, setSaleBreakdown] = useState(null);
 const [streakBorder, setStreakBorder] = useState(false);
@@ -2668,6 +2676,18 @@ const rep = calcRepEarned(g, finalNW, g.heatLevel, PLAYBOOKS.find(p => p.id === 
 setRepEarned(rep);
 setScores(p => […p, finalNW].sort((a, b) => b - a).slice(0, 5));
 setG(prev => ({ …prev, ending: fx.ending || ‘unknown’ }));
+// Persist meta-progression
+setMeta(prev => {
+const updated = {
+…prev,
+totalRep: (prev.totalRep || 0) + rep,
+lifetimeRep: (prev.lifetimeRep || 0) + rep,
+runsCompleted: (prev.runsCompleted || 0) + 1,
+bestScore: Math.max(prev.bestScore || 0, finalNW),
+};
+saveMeta(updated);
+return updated;
+});
 // Broke ending gets a choice screen first
 if (fx.ending === ‘broke’) setScreen(“broke_choice”);
 else setScreen(“gameover”);
@@ -2790,12 +2810,12 @@ if (_st) {
 if (_st.speaker === ‘narrator’) {
 // Narrator → inline msg, auto-mark seen
 setG(prev => {
-const _ns = { …prev, storySeen: { …(prev.storySeen||{}), [_st.id]:true }, evtMsg: _st.lines[0]?.text || ‘’ };
+const _ns = { …prev, storySeen: { …(prev.storySeen||{}), [_st.id]:true }, evtMsg: _st.lines[0]?.text || ‘’, dealsSinceLastEvent: 0 };
 return applyChoiceEffects(_ns, _st.choices?.[0]?.effects);
 });
 } else {
 // NPC → store in g.activeStorylet so it renders as overlay
-setG(prev => ({ …prev, activeStorylet: { id:_st.id, speaker:_st.speaker, portrait:_st.lines[0]?.portrait||_st.portrait, lines:_st.lines, choices:_st.choices, lineIdx:0, ready:false } }));
+setG(prev => ({ …prev, dealsSinceLastEvent: 0, activeStorylet: { id:_st.id, speaker:_st.speaker, portrait:_st.lines[0]?.portrait||_st.portrait, lines:_st.lines, choices:_st.choices, lineIdx:0, ready:false } }));
 }
 }
 }
@@ -2803,7 +2823,7 @@ setG(prev => ({ …prev, activeStorylet: { id:_st.id, speaker:_st.speaker, portr
 
 const doBuy = () => { if (selDrug === null || !trAmt) return; const r = act(processBuyDrug, selDrug, parseInt(trAmt) || 0); if (r.ok) { dismissCoach(“first_buy”); if (!coachShown[“travel_tip”]) showCoach(“travel_tip”); } setTrAmt(””); setTrMode(null); };
 const doSell = () => { if (selDrug === null || !trAmt) return; const r = act(processSellDrug, selDrug, parseInt(trAmt) || 0); if (r.ok) { dismissCoach(“first_sell”); const _st2 = selectStorylet(r.state); if (_st2 && _st2.speaker !== ‘narrator’) setG(prev => ({ …prev, activeStorylet: { id:_st2.id, speaker:_st2.speaker, portrait:_st2.lines[0]?.portrait||_st2.portrait, lines:_st2.lines, choices:_st2.choices, lineIdx:0, ready:false } })); } setTrAmt(””); setTrMode(null); };
-const doPolice = (action) => { const r = act(processPolice, action); setScreen(“policeResult”); setTimeout(() => setScreen(“game”), 2000); };
+const doPolice = (action) => { const r = act(processPolice, action); setPoliceResultText(r.resultText || “”); setScreen(“policeResult”); setTimeout(() => setScreen(“game”), 2500); };
 const dismissPolice = () => setScreen(“game”);
 // ── DIALOGUE HANDLERS ──
 const advanceDialogue = () => {
@@ -3046,6 +3066,7 @@ return <div style={{ …ctr }}><style>{CSS}</style>{vhsOverlay}
 <div style={{ display: “flex”, flexDirection: “column”, alignItems: “center”, justifyContent: “center”, minHeight: “100vh”, padding: 30, textAlign: “center”, animation: “screenSlideUp .4s ease-out” }}>
 <div style={{ fontSize: 48, marginBottom: 10 }}>{g.hp > 0 ? “😮‍💨” : “💀”}</div>
 <Neon color={g.hp > 0 ? C.blue : C.pink} size={18}>{g.hp > 0 ? “ESCAPED” : “CRITICAL”}</Neon>
+{policeResultText && <div style={{ fontSize: 13, color: C.text, marginTop: 8, marginBottom: 8, lineHeight: 1.6, maxWidth: 300, fontFamily: ftBody }}>{policeResultText}</div>}
 <div style={{ fontSize: 12, color: C.pink, marginBottom: 14 }}>HP: {g.hp}/100</div>
 <button onClick={dismissPolice} style={bt(C.green, C.green)}>CONTINUE</button>
 </div>
