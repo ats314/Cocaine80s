@@ -31,21 +31,19 @@ This is a **single-file React game** (`cocaine80master`, ~3,630 lines). The enti
 ### Architecture Layers
 ```
 ┌─────────────────────────────────────────────┐
-│  React Component (line ~2536+)              │  Platform-specific
+│  React Component (line ~2170+)              │  Platform-specific
 │  Screens, UI, event handlers                │
 ├─────────────────────────────────────────────┤
-│  Audio Engine (line ~2128-2242)             │  Web Audio API
+│  Audio Engine (line ~1790-1880)             │  Web Audio API
 ├─────────────────────────────────────────────┤
-│  State Transitions (line ~1317-2123)        │  PURE — no side effects
+│  State Transitions (line ~985-1770)         │  PURE — no side effects
 │  processTravel, processBuy, processSell...  │  Returns {state, effects}
 ├─────────────────────────────────────────────┤
-│  Narrative Engine (line ~552-1076)          │  PURE — storylet selection
+│  Narrative Engine (line ~412-938)           │  PURE — storylet selection
 │  STORY object, meetsConditions, selectStorylet│
 ├─────────────────────────────────────────────┤
-│  Meta-Progression (line ~1078-1254)         │  PURE — upgrade application
-├─────────────────────────────────────────────┤
-│  Constants & Data (line ~16-550)            │  Static game data
-│  Drugs, locations, eras, playbooks, etc.    │
+│  Constants & Data (line ~16-410)            │  Static game data
+│  Drugs, locations, eras, etc.               │
 └─────────────────────────────────────────────┘
 ```
 
@@ -78,6 +76,8 @@ Effects are processed separately by the React component. This is what makes the 
 2. Add atmosphere entry to `LOCATION_VIBE` (~line 35) with day/night arrays
 3. Add skyline profile to `SKYLINE_PROFILES` (~line 2447)
 4. Update arrays that are sized to location count: `safeHouses`, `turf`, `enforcers`, `demand` in `createInitialState`
+
+**Note:** The following systems were previously defined but have been removed: PLAYBOOKS, HEAT_LADDER, SAFEHOUSE_UPGRADES, daily challenge system, meta-progression (rep/upgrades), and stash inventory. `createInitialState` now takes no parameters.
 
 ### Adding a New Storylet
 1. Add entry to `STORY` object (~line 558-994) with:
@@ -147,15 +147,9 @@ Tabs within `game`: market, bag, travel, bank, empire, life
 
 6. **dealsSinceLastEvent**: This counter gates NPC storylets. It increments on buy/sell and resets when a storylet fires. If you add a new storylet, it uses this automatically via the condition system.
 
-## Unimplemented Features (Engine-Ready, No UI)
+## Unimplemented Features
 
-These systems are fully built in the engine but have no UI. They are high-impact contribution targets:
-
-1. **Pre-game selection screen** — Playbook picker, heat level selector, daily challenge entry
-2. **Stash system** — `stashInv` array exists, safe houses have `storage` capacity, but no deposit/withdraw UI
-3. **Safehouse upgrade shop** — Buy persistent upgrades with Rep between runs
-4. **Completion grid** — Track playbook × heat level combinations
-5. **Daily challenge leaderboard** — Seeded runs with `getDailySeed()` and `getDailyModifiers()`
+1. **Witness defuse encounter** — Fuse plants on big deals, but the $2K defuse opportunity is not wired to the encounter system
 
 ## Testing
 
