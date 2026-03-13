@@ -859,7 +859,14 @@ choices: [{ text:“x”, effects:{ ‘npc.colombiano.alive’:false, flags:[‘
 },
 };
 const NPC_COLORS = { maria:C.flamingo, ramirez:C.blue, colombiano:C.orange, narrator:C.dim };
-const NPC_NAMES = { maria:‘Maria Santos’, ramirez:‘Det. Ramirez’, colombiano:‘El Colombiano’, narrator:’’ };
+const NPC_NAMES = { maria:’Maria Santos’, ramirez:’Det. Ramirez’, colombiano:’El Colombiano’, narrator:’’ };
+
+// ── NPC PORTRAIT PIPELINE ──
+// Portrait images: replace these with full data URIs or URLs
+const NPC_PORTRAITS = { maria:null, ramirez:null, colombiano:null, hoffman:null };
+const NPC_ROLES = { maria:’THE INSIDER’, ramirez:’LAW ENFORCEMENT’, colombiano:’CRIMINAL RIVAL’, hoffman:’FEDERAL AGENT’, narrator:’NARRATOR’ };
+const NPC_GLOW = { maria:’255,105,180’, ramirez:’0,229,255’, colombiano:’255,107,53’, hoffman:’123,47,190’ };
+const NPC_EMOJI = { maria:’💃’, ramirez:’🕵️’, colombiano:’🇨🇴’, hoffman:’🕴️’, narrator:’📻’ };
 
 // Compute player qualities from state
 const computeQualities = (s) => {
@@ -1979,6 +1986,53 @@ const anim = flicker ? “neonFlicker 3s ease-in-out infinite” : pulse ? “ne
 return <span style={{ color: “#fff”, fontSize: size, fontFamily: “‘Orbitron’,sans-serif”, fontWeight: 700, textShadow: glow, animation: anim, letterSpacing: 1, WebkitTextStrokeWidth: “0.5px”, WebkitTextStrokeColor: color, …style }}>{children}</span>;
 });
 
+// ── NPC PORTRAIT with CSS post-processing pipeline ──
+const NpcPortrait = memo(function NP({ speaker, size = 140 }) {
+const img = NPC_PORTRAITS[speaker];
+const color = NPC_COLORS[speaker] || C.dim;
+const glow = NPC_GLOW[speaker] || '255,255,255';
+const emoji = NPC_EMOJI[speaker] || '📻';
+const isCircle = size <= 180;
+const dim = isCircle ? size : size;
+// If no portrait image, render enhanced emoji fallback
+if (!img) return <div style={{ width: dim, height: dim, borderRadius: isCircle ? "50%" : 8, background: `radial-gradient(ellipse at center, ${color}22, ${C.dark}ee)`, border: `2px solid ${color}44`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 0 20px rgba(${glow},0.3), 0 0 40px rgba(${glow},0.15), inset 0 0 30px rgba(${glow},0.08)`, position: "relative", overflow: "hidden" }}>
+  <span style={{ fontSize: dim * 0.45, filter: `drop-shadow(0 0 12px rgba(${glow},0.6))`, animation: "fadeIn .5s ease-out" }}>{emoji}</span>
+  {/* Scanline overlay */}
+  <div style={{ position: "absolute", inset: 0, backgroundImage: "repeating-linear-gradient(0deg, transparent 0px, transparent 2px, rgba(0,0,0,0.15) 2px, rgba(0,0,0,0.15) 4px)", pointerEvents: "none", borderRadius: "inherit" }} />
+  {/* Vignette */}
+  <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.5) 100%)", pointerEvents: "none", borderRadius: "inherit" }} />
+</div>;
+// Full portrait pipeline with image
+return <div style={{ width: dim, height: dim, borderRadius: isCircle ? "50%" : 8, overflow: "hidden", position: "relative", boxShadow: `0 0 20px rgba(${glow},0.3), 0 0 40px rgba(${glow},0.15)` }}>
+  <img src={img} alt={NPC_NAMES[speaker]} style={{ width: "100%", height: "100%", objectFit: "cover", filter: `contrast(1.25) saturate(1.4) brightness(1.05) drop-shadow(0 0 8px rgba(${glow},0.7)) drop-shadow(0 0 20px rgba(${glow},0.3))` }} />
+  {/* Gradient overlay — screen-blend from below */}
+  <div style={{ position: "absolute", inset: 0, background: `linear-gradient(180deg, transparent 30%, ${color}33 80%, ${color}55 100%)`, mixBlendMode: "screen" }} />
+  <div style={{ position: "absolute", inset: 0, background: "linear-gradient(0deg, rgba(0,0,0,0.6) 0%, transparent 40%)" }} />
+  {/* VHS scanlines */}
+  <div style={{ position: "absolute", inset: 0, backgroundImage: "repeating-linear-gradient(0deg, transparent 0px, transparent 2px, rgba(0,0,0,0.12) 2px, rgba(0,0,0,0.12) 4px)", pointerEvents: "none" }} />
+  {/* Film grain */}
+  <div style={{ position: "absolute", inset: 0, opacity: 0.06, mixBlendMode: "overlay", backgroundImage: "url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMDAiIGhlaWdodD0iMjAwIj48ZmlsdGVyIGlkPSJuIj48ZmVUdXJidWxlbmNlIHR5cGU9ImZyYWN0YWxOb2lzZSIgYmFzZUZyZXF1ZW5jeT0iMC44Ii8+PC9maWx0ZXI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsdGVyPSJ1cmwoI24pIi8+PC9zdmc+)", backgroundSize: "100px 100px" }} />
+  {/* Vignette */}
+  <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.5) 100%)" }} />
+</div>;
+});
+
+// ── SEGMENTED TRUST BAR ──
+function TrustBar({ value, max = 10, color, size = "normal" }) {
+const segments = 3;
+const pct = Math.max(0, Math.min(1, (value + (max/2)) / max));
+const filledSegments = Math.round(pct * segments);
+const trustLabel = filledSegments <= 1 ? "Low" : filledSegments === 2 ? "Medium" : "High";
+const trustColor = filledSegments <= 1 ? C.pink : filledSegments === 2 ? C.orange : C.green;
+const segW = size === "small" ? 16 : 24;
+const segH = size === "small" ? 4 : 6;
+return <div style={{ display: "flex", alignItems: "center", gap: size === "small" ? 4 : 6 }}>
+  <span style={{ fontFamily: ft, fontSize: size === "small" ? 8 : 9, color: C.dim, letterSpacing: 1 }}>TRUST</span>
+  <div style={{ display: "flex", gap: 2 }}>{Array.from({length:segments}).map((_,i) => <div key={i} style={{ width: segW, height: segH, borderRadius: 2, background: i < filledSegments ? (color || trustColor) : C.border, boxShadow: i < filledSegments ? `0 0 4px ${color || trustColor}66` : "none", transition: "all .3s ease" }} />)}</div>
+  <span style={{ fontFamily: ft, fontSize: size === "small" ? 8 : 9, color: trustColor }}>{trustLabel}</span>
+</div>;
+}
+
 function TravelAnim({ from, to, onDone, fast }) {
 useEffect(() => { const t = setTimeout(onDone, fast ? 400 : 1200); return () => clearTimeout(t); }, [onDone, fast]);
 return <div style={{ position: “fixed”, top: 0, left: 0, right: 0, bottom: 0, background: C.midnight, zIndex: 800, display: “flex”, flexDirection: “column”, alignItems: “center”, justifyContent: “center”, animation: “travelFade “ + (fast ? .4 : 1.2) + “s ease-in-out forwards” }}>
@@ -2892,30 +2946,32 @@ onDismiss={() => setCoachActive(null)}
 // ── DIALOGUE OVERLAY ── reads from g.activeStorylet
 const activeD = g.activeStorylet;
 const npcColor = activeD ? (NPC_COLORS[activeD.speaker] || C.dim) : C.dim;
-const dialogueOverlay = activeD && <div style={{ position:”fixed”, top:0, left:0, right:0, bottom:0, background: activeD.speaker==='maria' ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.flamingo}15)` : activeD.speaker==='ramirez' ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.blue}12)` : activeD.speaker==='colombiano' ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.orange}12)` : “rgba(0,0,0,.92)”, zIndex:870, display:”flex”, flexDirection:”column”, justifyContent:”flex-end”, padding:0, animation:”fadeIn .3s ease-out” }} onClick={!activeD.ready ? advanceDialogue : undefined}>
+const dialogueOverlay = activeD && <div style={{ position:”fixed”, top:0, left:0, right:0, bottom:0, background: activeD.speaker===’maria’ ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.flamingo}15)` : activeD.speaker===’ramirez’ ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.blue}12)` : activeD.speaker===’colombiano’ ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.orange}12)` : “rgba(0,0,0,.92)”, zIndex:870, display:”flex”, flexDirection:”column”, justifyContent:”flex-end”, padding:0, animation:”fadeIn .3s ease-out” }} onClick={!activeD.ready ? advanceDialogue : undefined}>
 {/* NPC portrait area */}
-<div style={{ flex:1, display:“flex”, alignItems:“center”, justifyContent:“center”, position:“relative” }}>
-<div style={{ fontSize:80, filter:`drop-shadow(0 0 30px ${npcColor}66)`, animation:“fadeIn .5s ease-out, easeOutBack .5s ease-out”, transform:“scale(1)”, transition:“all .3s ease” }}>
-{activeD.speaker===‘maria’ ? ‘💃’ : activeD.speaker===‘ramirez’ ? ‘🕵️’ : activeD.speaker===‘colombiano’ ? ‘🇨🇴’ : ‘📻’}
+<div style={{ flex:1, display:”flex”, flexDirection:”column”, alignItems:”center”, justifyContent:”center”, position:”relative”, gap:8 }}>
+<div style={{ animation:”fadeIn .5s ease-out, easeOutBack .5s ease-out” }}>
+  <NpcPortrait speaker={activeD.speaker} size={140} />
 </div>
-{/* NPC name badge */}
-{activeD.speaker !== ‘narrator’ && <div style={{ position:“absolute”, bottom:20, left:“50%”, transform:“translateX(-50%)”, padding:“4px 16px”, background:npcColor+“33”, border:`1px solid ${npcColor}66`, borderRadius:20, fontSize:10, color:npcColor, letterSpacing:2, fontFamily:ft }}>
-{NPC_NAMES[activeD.speaker] || ‘’}
+{/* Role + name + trust */}
+{activeD.speaker !== ‘narrator’ && <div style={{ textAlign:”center”, animation:”fadeIn .6s ease-out .2s both” }}>
+  <div style={{ fontFamily:ft, fontSize:9, letterSpacing:3, color:npcColor, marginBottom:2 }}>{NPC_ROLES[activeD.speaker] || ‘’}</div>
+  <div style={{ fontFamily:”’Georgia’,serif”, fontSize:16, color:C.text, fontWeight:”bold”, marginBottom:4 }}>{NPC_NAMES[activeD.speaker] || ‘’}</div>
+  {activeD.speaker !== ‘hoffman’ && <div style={{ display:”flex”, justifyContent:”center” }}><TrustBar value={activeD.speaker === ‘ramirez’ ? -(g.npcState.ramirez.evidence||0) : (g.npcState[activeD.speaker]?.trust || 0)} color={npcColor} size=”small” /></div>}
 </div>}
 </div>
 {/* Dialogue box */}
-<div style={{ background:`linear-gradient(180deg, ${C.panel}ee, ${C.dark}ff)`, borderTop:`2px solid ${npcColor}44`, padding:“20px 24px 24px”, minHeight:180 }}>
+<div style={{ background:`linear-gradient(180deg, ${C.panel}ee, ${C.dark}ff)`, borderTop:`2px solid ${npcColor}44`, padding:”20px 24px 24px”, minHeight:180 }}>
 {/* Current line */}
-<div style={{ fontSize:14, color:C.text, lineHeight:1.8, fontFamily:ftBody, marginBottom:16, animation:“fadeIn .3s ease-out”, minHeight:60 }}>
-{activeD.lines[activeD.lineIdx]?.text || ‘’}
+<div style={{ fontSize:14, color:C.text, lineHeight:1.8, fontFamily:ftBody, marginBottom:16, animation:”fadeIn .3s ease-out”, minHeight:60, fontStyle:”italic” }}>
+“{activeD.lines[activeD.lineIdx]?.text || ‘’}”
 </div>
 {/* Choices or tap prompt */}
 {activeD.ready ? (
-<div style={{ display:“flex”, flexDirection:“column”, gap:8 }}>
-{activeD.choices.map((ch, ci) => <button key={ci} onClick={(e) => { e.stopPropagation(); if (ch._dismiss) { setG(prev => ({ …prev, activeStorylet: null })); } else { makeDialogueChoice(ci); } }} style={{ …bt(npcColor), padding:“10px 16px”, fontSize:12, textAlign:“left”, fontFamily:ftBody, lineHeight:1.4, minHeight:48 }}>{ch.text}</button>)}
+<div style={{ display:”flex”, flexDirection:”column”, gap:8 }}>
+{activeD.choices.map((ch, ci) => <button key={ci} onClick={(e) => { e.stopPropagation(); if (ch._dismiss) { setG(prev => ({ …prev, activeStorylet: null })); } else { makeDialogueChoice(ci); } }} style={{ …bt(npcColor), padding:”10px 16px”, fontSize:12, textAlign:”left”, fontFamily:ftBody, lineHeight:1.4, minHeight:48 }}>{ch.text}</button>)}
 </div>
 ) : (
-<div style={{ fontSize:10, color:C.dim, textAlign:“center”, animation:“pulse 2s infinite”, letterSpacing:2, fontFamily:ft }}>TAP TO CONTINUE</div>
+<div style={{ fontSize:10, color:C.dim, textAlign:”center”, animation:”pulse 2s infinite”, letterSpacing:2, fontFamily:ft }}>TAP TO CONTINUE</div>
 )}
 </div>
 
@@ -2966,16 +3022,17 @@ const turfWarOverlay = turfWar && <div style={{ position: “fixed”, top: 0, l
 
   </div>;
 
-const npcOverlay = npcEvent && <div style={{ position: “fixed”, top: 0, left: 0, right: 0, bottom: 0, background: “rgba(0,0,0,.88)”, zIndex: 835, display: “flex”, alignItems: “center”, justifyContent: “center”, padding: 20 }}>
-<div style={{ …bx, maxWidth: 340, textAlign: “center”, margin: 0, background: C.panel, border: “1px solid “ + C.purple + “44”, animation: “slideIn .4s ease-out” }}>
-<div style={{ fontSize: 36, marginBottom: 6 }}>{npcEvent.npc === “colombiano” ? “🇨🇴” : npcEvent.npc === “ramirez” ? “🕵️” : npcEvent.npc === “hoffman” ? “🕴️” : “💃”}</div>
-<Neon color={C.purple} size={14} style={{ marginBottom: 8 }}>{npcEvent.npc === “colombiano” ? “EL COLOMBIANO” : npcEvent.npc === “ramirez” ? “DET. RAMIREZ” : npcEvent.npc === “hoffman” ? “AGENT HOFFMAN” : “MARIA SANTOS”}</Neon>
-<div style={{ fontSize: 13, color: C.text, lineHeight: 1.6, marginBottom: 14 }}>{npcEvent.text}</div>
-{npcEvent.opts ? <div style={{ display: “flex”, flexDirection: “column”, gap: 6 }}>{npcEvent.opts.map((o, i) => <button key={i} onClick={() => doNpcChoice(o.action)} style={bt(i === 0 ? C.gold : C.dim)}>{o.label}</button>)}</div> :
-<button onClick={() => setNpcEvent(null)} style={bt(C.blue)}>GOT IT</button>}
+const npcOverlay = npcEvent && (() => { const nc = NPC_COLORS[npcEvent.npc] || C.purple; const npcTrust = npcEvent.npc === 'ramirez' ? -(g.npcState.ramirez.evidence||0) : (g.npcState[npcEvent.npc]?.trust || 0); return <div style={{ position: “fixed”, top: 0, left: 0, right: 0, bottom: 0, background: `linear-gradient(180deg, rgba(0,0,0,.92), ${nc}10)`, zIndex: 835, display: “flex”, alignItems: “center”, justifyContent: “center”, padding: 20 }}>
+<div style={{ …bx, maxWidth: 360, textAlign: “center”, margin: 0, background: C.panel, border: `1px solid ${nc}33`, animation: “slideIn .4s ease-out”, padding: “16px 16px 20px” }}>
+<NpcPortrait speaker={npcEvent.npc} size={120} />
+<div style={{ fontFamily: ft, fontSize: 9, letterSpacing: 3, color: nc, marginTop: 10, marginBottom: 2 }}>{NPC_ROLES[npcEvent.npc] || ''}</div>
+<div style={{ fontFamily: “'Georgia',serif”, fontSize: 16, color: C.text, fontWeight: “bold”, marginBottom: 6 }}>{NPC_NAMES[npcEvent.npc] || npcEvent.npc?.toUpperCase()}</div>
+{npcEvent.npc !== 'hoffman' && npcEvent.npc !== 'narrator' && <div style={{ display: “flex”, justifyContent: “center”, marginBottom: 10 }}><TrustBar value={npcTrust} color={nc} /></div>}
+<div style={{ background: C.dark + “cc”, border: `1px solid ${C.border}`, borderRadius: 6, padding: “12px 14px”, marginBottom: 14 }}><div style={{ fontSize: 13, color: C.text, lineHeight: 1.6, fontStyle: “italic”, fontFamily: ftBody }}>”{npcEvent.text}”</div></div>
+{npcEvent.opts ? <div style={{ display: “flex”, gap: 8 }}>{npcEvent.opts.map((o, i) => <button key={i} onClick={() => doNpcChoice(o.action)} style={{ …bt(i === 0 ? nc : C.dim, i === 0 ? nc : undefined), flex: 1, fontSize: 11 }}>{o.label}</button>)}</div> :
+<button onClick={() => setNpcEvent(null)} style={{ …bt(nc), width: “100%” }}>GOT IT</button>}
 </div>
-
-  </div>;
+</div>; })();
 
 // ── DEAL STEP OVERLAY ──
 const dealOverlay = dealEvt && <div style={{ position: “fixed”, top: 0, left: 0, right: 0, bottom: 0, background: “rgba(0,0,0,.88)”, zIndex: 836, display: “flex”, alignItems: “center”, justifyContent: “center”, padding: 20 }}>
