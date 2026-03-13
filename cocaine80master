@@ -1929,7 +1929,7 @@ const bt = (c, bg = “transparent”) => ({ fontFamily: ft, fontSize: 12, borde
 const inp = { fontFamily: ftBody, fontSize: 16, background: C.dark, color: C.green, border: “1px solid “ + C.green + “66”, borderRadius: 5, padding: “10px”, width: “100%”, outline: “none”, textAlign: “center”, letterSpacing: 1 };
 const UNLOCK_MAP = { first_sale: { msg: “🏦 BANK UNLOCKED”, sub: “Deposit cash, pay off the loan shark, buy gear”, color: C.blue }, “10k”: { msg: “🏠 SAFE HOUSES UNLOCKED”, sub: “Buy property to stash product and cool your heat”, color: C.green }, debt_free: { msg: “🏴 EMPIRE UNLOCKED”, sub: “Claim territory, hire enforcers, build your kingdom”, color: C.gold }, kingpin_deal: { msg: “👑 KINGPIN STATUS”, sub: “$100K in a single deal. You’re a legend.”, color: C.gold } };
 
-const CSS = `@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap'); @keyframes floatUp{0%{opacity:1;transform:translateY(0) scale(1)}50%{opacity:.8;transform:translateY(-30px) scale(1.1)}100%{opacity:0;transform:translateY(-70px) scale(.6)}} @keyframes floatSale{0%{opacity:1;transform:translateY(0) scale(.8)}20%{transform:translateY(-10px) scale(1.2)}100%{opacity:0;transform:translateY(-80px) scale(.7) rotate(5deg)}} @keyframes shake{0%,100%{transform:translateX(0)}10%{transform:translateX(-8px) rotate(-.5deg)}30%{transform:translateX(6px) rotate(.5deg)}50%{transform:translateX(-5px)}70%{transform:translateX(4px)}90%{transform:translateX(-2px)}} @keyframes bigShake{0%,100%{transform:translate(0,0) rotate(0)}15%{transform:translate(-10px,2px) rotate(-1deg)}35%{transform:translate(8px,-2px) rotate(1deg)}55%{transform:translate(-6px,1px) rotate(-.5deg)}75%{transform:translate(4px,-1px) rotate(.3deg)}} @keyframes screenIn{0%{opacity:0;transform:scale(.96)}100%{opacity:1;transform:scale(1)}} @keyframes screenSlideUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}} @keyframes screenFadeIn{0%{opacity:0}100%{opacity:1}} @keyframes travelFade{0%{opacity:0;transform:scale(1.05)}15%{opacity:1;transform:scale(1)}85%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.95)}} @keyframes dotPulse{0%,100%{opacity:.2;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}} @keyframes neonFlicker{0%,100%{opacity:1}93%{opacity:.4}94%{opacity:1}96%{opacity:.6}97%{opacity:1}} @keyframes neonPulse{0%,100%{text-shadow:0 0 2px #fff,0 0 4px #fff,0 0 8px currentColor,0 0 16px currentColor,0 0 32px currentColor}50%{text-shadow:0 0 4px #fff,0 0 8px #fff,0 0 16px currentColor,0 0 32px currentColor,0 0 64px currentColor,0 0 90px currentColor}} @keyframes pulse{0%,100%{opacity:.5}50%{opacity:1}} @keyframes fadeIn{0%{opacity:0}100%{opacity:1}} @keyframes slideIn{0%{transform:translateY(20px);opacity:0}100%{transform:translateY(0);opacity:1}} @keyframes slideDown{0%{transform:translateY(-100%);opacity:0}100%{transform:translateY(0);opacity:1}} @keyframes achSlide{0%{transform:translateY(-80px) scale(.9);opacity:0}15%{transform:translateY(0) scale(1);opacity:1}85%{opacity:1}100%{transform:translateY(-80px) scale(.9);opacity:0}} @keyframes cloudDrift{0%,100%{transform:translateX(-5%)}50%{transform:translateX(5%)}} @keyframes palmSway{0%,100%{transform:rotate(-2deg)}50%{transform:rotate(2deg)}} @keyframes bustedFlash{0%{background:rgba(255,45,123,.3)}100%{background:transparent}} @keyframes priceUp{0%{transform:scale(1)}50%{transform:scale(1.15)}100%{transform:scale(1)}} @keyframes rollUp{0%{transform:translateY(8px);opacity:0}100%{transform:translateY(0);opacity:1}} @keyframes scalePunch{0%{transform:scale(1)}50%{transform:scale(1.3)}100%{transform:scale(1)}} @keyframes streakGlow{0%,100%{box-shadow:0 0 10px ${C.gold}44,0 0 20px ${C.gold}22,inset 0 0 20px ${C.gold}11}50%{box-shadow:0 0 20px ${C.gold}66,0 0 40px ${C.gold}44,inset 0 0 30px ${C.gold}22}} @keyframes rainbowBorder{0%{border-color:${C.pink}}14%{border-color:${C.orange}}28%{border-color:${C.gold}}42%{border-color:${C.green}}57%{border-color:${C.blue}}71%{border-color:${C.purple}}85%{border-color:${C.flamingo}}100%{border-color:${C.pink}}} @keyframes slideReveal{0%{width:0;opacity:0}100%{width:100%;opacity:1}} @keyframes numberPop{0%{transform:scale(0.5);opacity:0}60%{transform:scale(1.2)}100%{transform:scale(1);opacity:1}} @keyframes glowPulse{0%,100%{box-shadow:0 0 5px currentColor}50%{box-shadow:0 0 20px currentColor,0 0 30px currentColor}} @keyframes btnPress{0%{transform:scale(1)}40%{transform:scale(.93,.97)}100%{transform:scale(1)}} @keyframes easeOutBack{0%{transform:translateY(12px) scale(.95);opacity:0}70%{transform:translateY(-3px) scale(1.02);opacity:1}100%{transform:translateY(0) scale(1);opacity:1}} @keyframes hudReveal{0%{transform:scale(0) translateY(8px);opacity:0}50%{transform:scale(1.15) translateY(-2px);opacity:1}100%{transform:scale(1) translateY(0);opacity:1}} @keyframes vhsScan{0%{top:-80px}100%{top:100vh}} @keyframes retroGrid{0%{transform:perspective(400px) rotateX(65deg) translateY(0)}100%{transform:perspective(400px) rotateX(65deg) translateY(50px)}} @keyframes ambientFloat{0%{transform:translateY(0) translateX(0);opacity:0}10%{opacity:.6}50%{transform:translateY(-40vh) translateX(15px);opacity:.4}90%{opacity:.1}100%{transform:translateY(-80vh) translateX(-10px);opacity:0}} @keyframes ambientDrift{0%{transform:translateX(-5px) translateY(0);opacity:0}15%{opacity:.5}85%{opacity:.3}100%{transform:translateX(8px) translateY(-60vh);opacity:0}} input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0} input[type=number]{-moz-appearance:textfield}*{box-sizing:border-box} button:active{animation:btnPress .2s ease-out!important}`;
+const CSS = `@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap'); @keyframes floatUp{0%{opacity:1;transform:translateY(0) scale(1)}50%{opacity:.8;transform:translateY(-30px) scale(1.1)}100%{opacity:0;transform:translateY(-70px) scale(.6)}} @keyframes floatSale{0%{opacity:1;transform:translateY(0) scale(.8)}20%{transform:translateY(-10px) scale(1.2)}100%{opacity:0;transform:translateY(-80px) scale(.7) rotate(5deg)}} @keyframes shake{0%,100%{transform:translateX(0)}10%{transform:translateX(-8px) rotate(-.5deg)}30%{transform:translateX(6px) rotate(.5deg)}50%{transform:translateX(-5px)}70%{transform:translateX(4px)}90%{transform:translateX(-2px)}} @keyframes bigShake{0%,100%{transform:translate(0,0) rotate(0)}15%{transform:translate(-10px,2px) rotate(-1deg)}35%{transform:translate(8px,-2px) rotate(1deg)}55%{transform:translate(-6px,1px) rotate(-.5deg)}75%{transform:translate(4px,-1px) rotate(.3deg)}} @keyframes screenIn{0%{opacity:0;transform:scale(.96)}100%{opacity:1;transform:scale(1)}} @keyframes screenSlideUp{0%{opacity:0;transform:translateY(30px)}100%{opacity:1;transform:translateY(0)}} @keyframes screenFadeIn{0%{opacity:0}100%{opacity:1}} @keyframes travelFade{0%{opacity:0;transform:scale(1.05)}15%{opacity:1;transform:scale(1)}85%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(.95)}} @keyframes dotPulse{0%,100%{opacity:.2;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}} @keyframes neonFlicker{0%,100%{opacity:1}93%{opacity:.4}94%{opacity:1}96%{opacity:.6}97%{opacity:1}} @keyframes neonPulse{0%,100%{text-shadow:0 0 2px #fff,0 0 4px #fff,0 0 8px currentColor,0 0 16px currentColor,0 0 32px currentColor}50%{text-shadow:0 0 4px #fff,0 0 8px #fff,0 0 16px currentColor,0 0 32px currentColor,0 0 64px currentColor,0 0 90px currentColor}} @keyframes pulse{0%,100%{opacity:.5}50%{opacity:1}} @keyframes fadeIn{0%{opacity:0}100%{opacity:1}} @keyframes slideIn{0%{transform:translateY(20px);opacity:0}100%{transform:translateY(0);opacity:1}} @keyframes slideDown{0%{transform:translateY(-100%);opacity:0}100%{transform:translateY(0);opacity:1}} @keyframes achSlide{0%{transform:translateY(-80px) scale(.9);opacity:0}15%{transform:translateY(0) scale(1);opacity:1}85%{opacity:1}100%{transform:translateY(-80px) scale(.9);opacity:0}} @keyframes cloudDrift{0%,100%{transform:translateX(-5%)}50%{transform:translateX(5%)}} @keyframes palmSway{0%,100%{transform:rotate(-2deg)}50%{transform:rotate(2deg)}} @keyframes bustedFlash{0%{background:rgba(255,45,123,.3)}100%{background:transparent}} @keyframes priceUp{0%{transform:scale(1)}50%{transform:scale(1.15)}100%{transform:scale(1)}} @keyframes rollUp{0%{transform:translateY(8px);opacity:0}100%{transform:translateY(0);opacity:1}} @keyframes scalePunch{0%{transform:scale(1)}50%{transform:scale(1.3)}100%{transform:scale(1)}} @keyframes streakGlow{0%,100%{box-shadow:0 0 10px ${C.gold}44,0 0 20px ${C.gold}22,inset 0 0 20px ${C.gold}11}50%{box-shadow:0 0 20px ${C.gold}66,0 0 40px ${C.gold}44,inset 0 0 30px ${C.gold}22}} @keyframes rainbowBorder{0%{border-color:${C.pink}}14%{border-color:${C.orange}}28%{border-color:${C.gold}}42%{border-color:${C.green}}57%{border-color:${C.blue}}71%{border-color:${C.purple}}85%{border-color:${C.flamingo}}100%{border-color:${C.pink}}} @keyframes slideReveal{0%{width:0;opacity:0}100%{width:100%;opacity:1}} @keyframes numberPop{0%{transform:scale(0.5);opacity:0}60%{transform:scale(1.2)}100%{transform:scale(1);opacity:1}} @keyframes glowPulse{0%,100%{box-shadow:0 0 5px currentColor}50%{box-shadow:0 0 20px currentColor,0 0 30px currentColor}} @keyframes btnPress{0%{transform:scale(1)}40%{transform:scale(.93,.97)}100%{transform:scale(1)}} @keyframes easeOutBack{0%{transform:translateY(12px) scale(.95);opacity:0}70%{transform:translateY(-3px) scale(1.02);opacity:1}100%{transform:translateY(0) scale(1);opacity:1}} @keyframes hudReveal{0%{transform:scale(0) translateY(8px);opacity:0}50%{transform:scale(1.15) translateY(-2px);opacity:1}100%{transform:scale(1) translateY(0);opacity:1}} @keyframes vhsScan{0%{top:-80px}100%{top:100vh}} @keyframes retroGrid{0%{transform:perspective(400px) rotateX(65deg) translateY(0)}100%{transform:perspective(400px) rotateX(65deg) translateY(50px)}} @keyframes ambientFloat{0%{transform:translateY(0) translateX(0);opacity:0}10%{opacity:.6}50%{transform:translateY(-40vh) translateX(15px);opacity:.4}90%{opacity:.1}100%{transform:translateY(-80vh) translateX(-10px);opacity:0}} @keyframes ambientDrift{0%{transform:translateX(-5px) translateY(0);opacity:0}15%{opacity:.5}85%{opacity:.3}100%{transform:translateX(8px) translateY(-60vh);opacity:0}} @keyframes heatCritical{0%,100%{box-shadow:0 0 4px ${C.pink}88}50%{box-shadow:0 0 12px ${C.pink}cc,0 0 24px ${C.pink}66}} @keyframes streakPop{0%{transform:scale(1)}50%{transform:scale(1.4)}100%{transform:scale(1)}} input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0} input[type=number]{-moz-appearance:textfield}*{box-sizing:border-box} button:active{animation:btnPress .2s ease-out!important}`;
 // ═══════════════════════════════════════════════════════════════
 // SMALL UI COMPONENTS
 // ═══════════════════════════════════════════════════════════════
@@ -2856,11 +2856,13 @@ return <div style={{ ...ctr, background: isWin ? `linear-gradient(180deg, ${C.mi
 
     {/* Montage Timeline */}
     {g.montage.length > 0 && <div style={{ width: "100%", maxWidth: 340, marginBottom: 12, padding: "8px 12px", background: C.dark + "77", borderRadius: 6, border: "1px solid " + C.border + "33" }}>
-      <div style={{ fontSize: 8, color: C.dim, letterSpacing: 2, marginBottom: 4, fontFamily: ft }}>TIMELINE</div>
-      {g.montage.slice(-6).map((m, i) => <div key={i} style={{ display: "flex", gap: 8, marginBottom: 3 }}>
-        <span style={{ fontSize: 8, color: ec.color, minWidth: 30, fontFamily: ft }}>D{Math.floor(m.move / 2) + 1}</span>
+      <div style={{ fontSize: 8, color: C.dim, letterSpacing: 2, marginBottom: 6, fontFamily: ft }}>TIMELINE</div>
+      {g.montage.slice(-6).map((m, i, arr) => { const mtColor = m.text.includes('turf') || m.text.includes('territory') ? C.pink : m.text.includes('deal') || m.text.includes('sold') || m.text.includes('profit') ? C.green : m.text.includes('NPC') || m.text.includes('Maria') || m.text.includes('Ramirez') || m.text.includes('Colombiano') ? C.purple : C.blue; return <div key={i} style={{ display: "flex", gap: 8, marginBottom: 0, position: "relative", paddingLeft: 12, paddingBottom: i < arr.length - 1 ? 8 : 0 }}>
+        <div style={{ position: "absolute", left: 3, top: 2, width: 6, height: 6, borderRadius: "50%", background: mtColor, boxShadow: `0 0 4px ${mtColor}66` }} />
+        {i < arr.length - 1 && <div style={{ position: "absolute", left: 5, top: 10, width: 1, height: "calc(100% - 4px)", background: C.border }} />}
+        <span style={{ fontSize: 8, color: ec.color, minWidth: 24, fontFamily: ft }}>D{Math.floor(m.move / 2) + 1}</span>
         <span style={{ fontSize: 9, color: C.dim + 'cc' }}>{m.text}</span>
-      </div>)}
+      </div>; })}
     </div>}
     
     {/* Final Stats */}
@@ -2890,7 +2892,7 @@ onDismiss={() => setCoachActive(null)}
 // ── DIALOGUE OVERLAY ── reads from g.activeStorylet
 const activeD = g.activeStorylet;
 const npcColor = activeD ? (NPC_COLORS[activeD.speaker] || C.dim) : C.dim;
-const dialogueOverlay = activeD && <div style={{ position:“fixed”, top:0, left:0, right:0, bottom:0, background:“rgba(0,0,0,.92)”, zIndex:870, display:“flex”, flexDirection:“column”, justifyContent:“flex-end”, padding:0, animation:“fadeIn .3s ease-out” }} onClick={!activeD.ready ? advanceDialogue : undefined}>
+const dialogueOverlay = activeD && <div style={{ position:”fixed”, top:0, left:0, right:0, bottom:0, background: activeD.speaker==='maria' ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.flamingo}15)` : activeD.speaker==='ramirez' ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.blue}12)` : activeD.speaker==='colombiano' ? `linear-gradient(180deg, rgba(0,0,0,.92), ${C.orange}12)` : “rgba(0,0,0,.92)”, zIndex:870, display:”flex”, flexDirection:”column”, justifyContent:”flex-end”, padding:0, animation:”fadeIn .3s ease-out” }} onClick={!activeD.ready ? advanceDialogue : undefined}>
 {/* NPC portrait area */}
 <div style={{ flex:1, display:“flex”, alignItems:“center”, justifyContent:“center”, position:“relative” }}>
 <div style={{ fontSize:80, filter:`drop-shadow(0 0 30px ${npcColor}66)`, animation:“fadeIn .5s ease-out, easeOutBack .5s ease-out”, transform:“scale(1)”, transition:“all .3s ease” }}>
@@ -3014,7 +3016,7 @@ return <div style={{ …ctr, paddingBottom: 0, display: “flex”, flexDirectio
     </div>
     <div style={{ textAlign: "right" }}>
       <div style={{ fontSize: 9, color: C.dim, letterSpacing: 2, fontFamily: ft }}>{isNight ? "NIGHT" : "DAY"} {dayNum}</div>
-      <div style={{ fontSize: 11, color: C.text, fontFamily: ft, fontWeight: "bold" }}>{FM(g.cash)} {g.streak >= 3 && <span style={{ color: C.gold, fontSize: 9 }}>🔥{g.streak}x</span>}</div>
+      <div style={{ fontSize: 11, color: C.text, fontFamily: ft, fontWeight: "bold" }}>{FM(g.cash)} {g.streak >= 3 && <span style={{ color: C.gold, fontSize: 9, display: "inline-block", animation: "streakPop .4s ease-out", textShadow: `0 0 6px ${C.gold}66` }}>🔥{g.streak}x</span>}</div>
     </div>
   </div>
 
@@ -3023,7 +3025,7 @@ return <div style={{ …ctr, paddingBottom: 0, display: “flex”, flexDirectio
     {hudVisible.hp && <div style={{ textAlign: "center", animation: getHudAnim("hp"), minWidth: 44 }}><div style={{ fontSize: 8, color: C.dim, letterSpacing: 1 }}>HP</div><div style={{ fontSize: 11, color: g.hp < 30 ? C.pink : C.green, fontFamily: ft, textShadow: `0 0 6px ${g.hp < 30 ? C.pink : C.green}66` }}>{g.hp}</div><div style={{ height: 2, marginTop: 3, borderRadius: 1, background: C.dark, overflow: "hidden" }}><div style={{ height: "100%", width: `${g.hp}%`, background: g.hp < 30 ? C.pink : C.green, boxShadow: `0 0 4px ${g.hp < 30 ? C.pink : C.green}88`, transition: "width .5s ease" }} /></div></div>}
     {hudVisible.debt && <div style={{ textAlign: "center", animation: getHudAnim("debt"), minWidth: 44 }}><div style={{ fontSize: 8, color: C.dim, letterSpacing: 1 }}>DEBT</div><div style={{ fontSize: 11, color: g.debt > 0 ? C.pink : C.green, fontFamily: ft, textShadow: `0 0 6px ${g.debt > 0 ? C.pink : C.green}66` }}>{FM(g.debt)}</div></div>}
     {hudVisible.bank && <div style={{ textAlign: "center", animation: getHudAnim("bank"), minWidth: 44 }}><div style={{ fontSize: 8, color: C.dim, letterSpacing: 1 }}>BANK</div><div style={{ fontSize: 11, color: C.blue, fontFamily: ft, textShadow: `0 0 6px ${C.blue}66` }}>{FM(g.bank)}</div></div>}
-    {hudVisible.heat && <div style={{ textAlign: "center", animation: getHudAnim("heat"), minWidth: 44 }}><div style={{ fontSize: 8, color: C.dim, letterSpacing: 1 }}>HEAT</div><div style={{ fontSize: 11, color: g.fedHeat > 60 ? C.pink : g.fedHeat > 30 ? C.orange : C.green, fontFamily: ft, textShadow: `0 0 6px ${g.fedHeat > 60 ? C.pink : g.fedHeat > 30 ? C.orange : C.green}66` }}>{g.fedHeat}%</div><div style={{ height: 2, marginTop: 3, borderRadius: 1, background: C.dark, overflow: "hidden" }}><div style={{ height: "100%", width: `${Math.min(g.fedHeat, 100)}%`, background: `linear-gradient(90deg, ${C.green}, ${g.fedHeat > 30 ? C.orange : C.green}, ${g.fedHeat > 60 ? C.pink : C.orange})`, boxShadow: `0 0 4px ${g.fedHeat > 60 ? C.pink : C.orange}88`, transition: "width .5s ease" }} /></div></div>}
+    {hudVisible.heat && <div style={{ textAlign: "center", animation: getHudAnim("heat"), minWidth: 44 }}><div style={{ fontSize: 8, color: g.fedHeat >= 90 ? C.pink : C.dim, letterSpacing: 1, animation: g.fedHeat >= 90 ? "pulse 1s infinite" : "none" }}>{g.fedHeat >= 90 ? "⚠ CRITICAL" : "HEAT"}</div><div style={{ fontSize: 11, color: g.fedHeat > 60 ? C.pink : g.fedHeat > 30 ? C.orange : C.green, fontFamily: ft, textShadow: `0 0 6px ${g.fedHeat > 60 ? C.pink : g.fedHeat > 30 ? C.orange : C.green}66` }}>{g.fedHeat}%</div><div style={{ height: 2, marginTop: 3, borderRadius: 1, background: C.dark, overflow: "hidden" }}><div style={{ height: "100%", width: `${Math.min(g.fedHeat, 100)}%`, background: `linear-gradient(90deg, ${C.green}, ${g.fedHeat > 30 ? C.orange : C.green}, ${g.fedHeat > 60 ? C.pink : C.orange})`, boxShadow: `0 0 4px ${g.fedHeat > 60 ? C.pink : C.orange}88`, transition: "width .5s ease", animation: g.fedHeat > 70 ? "heatCritical 1.5s ease-in-out infinite" : "none" }} /></div></div>}
     {hudVisible.cred && <div style={{ textAlign: "center", animation: getHudAnim("cred"), minWidth: 44 }}><div style={{ fontSize: 8, color: C.dim, letterSpacing: 1 }}>CRED</div><div style={{ fontSize: 11, color: C.gold, fontFamily: ft, textShadow: `0 0 6px ${C.gold}66` }}>{g.cred}</div></div>}
   </div>}
 
@@ -3031,33 +3033,45 @@ return <div style={{ …ctr, paddingBottom: 0, display: “flex”, flexDirectio
   {(g.npcState.maria.met || g.npcState.ramirez.met || g.npcState.colombiano.met) && <div style={{ display:"flex", justifyContent:"center", gap:12, padding:"4px 12px", margin:"2px 12px 0", background:C.dark+"66", borderRadius:4 }}>
     {g.npcState.maria.met && <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:9, color: g.npcState.maria.trust > 2 ? C.flamingo : g.npcState.maria.trust < -1 ? C.pink : C.dim }}>
       <span style={{ fontSize:14 }}>💃</span>
-      <span style={{ fontFamily:ft, letterSpacing:1 }}>{g.npcState.maria.trust > 4 ? '♥♥' : g.npcState.maria.trust > 1 ? '♥' : g.npcState.maria.trust < -2 ? '✗✗' : g.npcState.maria.trust < 0 ? '✗' : '—'}</span>
+      <div style={{ display:"flex", flexDirection:"column", gap:1 }}>
+        <span style={{ fontFamily:ft, letterSpacing:1 }}>{g.npcState.maria.trust > 4 ? '♥♥' : g.npcState.maria.trust > 1 ? '♥' : g.npcState.maria.trust < -2 ? '✗✗' : g.npcState.maria.trust < 0 ? '✗' : '—'}</span>
+        <div style={{ width:24, height:2, borderRadius:1, background:C.dark, overflow:"hidden" }}><div style={{ height:"100%", width:`${Math.max(0, Math.min(100, (g.npcState.maria.trust + 5) * 10))}%`, background: g.npcState.maria.trust > 0 ? C.flamingo : g.npcState.maria.trust < 0 ? C.pink : C.dim, transition:"width .5s ease" }} /></div>
+      </div>
     </div>}
     {g.npcState.ramirez.met && <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:9, color: g.npcState.ramirez.evidence > 5 ? C.pink : g.npcState.ramirez.evidence > 2 ? C.orange : C.dim }}>
       <span style={{ fontSize:14 }}>🕵️</span>
-      <span style={{ fontFamily:ft, letterSpacing:1 }}>📋{g.npcState.ramirez.evidence||0}</span>
+      <div style={{ display:"flex", flexDirection:"column", gap:1 }}>
+        <span style={{ fontFamily:ft, letterSpacing:1 }}>📋{g.npcState.ramirez.evidence||0}</span>
+        <div style={{ width:24, height:2, borderRadius:1, background:C.dark, overflow:"hidden" }}><div style={{ height:"100%", width:`${Math.min(100, (g.npcState.ramirez.evidence||0) * 10)}%`, background: (g.npcState.ramirez.evidence||0) > 7 ? C.pink : (g.npcState.ramirez.evidence||0) > 4 ? C.orange : C.blue, transition:"width .5s ease", animation: (g.npcState.ramirez.evidence||0) > 7 ? "pulse 1.5s infinite" : "none" }} /></div>
+      </div>
     </div>}
     {g.npcState.colombiano.met && <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:9, color: g.npcState.colombiano.trust > 2 ? C.orange : g.npcState.colombiano.trust < -1 ? C.pink : C.dim }}>
       <span style={{ fontSize:14 }}>🇨🇴</span>
-      <span style={{ fontFamily:ft, letterSpacing:1 }}>{g.npcState.colombiano.trust > 3 ? '★★' : g.npcState.colombiano.trust > 0 ? '★' : g.npcState.colombiano.trust < -2 ? '✗✗' : g.npcState.colombiano.trust < 0 ? '✗' : '—'}</span>
+      <div style={{ display:"flex", flexDirection:"column", gap:1 }}>
+        <span style={{ fontFamily:ft, letterSpacing:1 }}>{g.npcState.colombiano.trust > 3 ? '★★' : g.npcState.colombiano.trust > 0 ? '★' : g.npcState.colombiano.trust < -2 ? '✗✗' : g.npcState.colombiano.trust < 0 ? '✗' : '—'}</span>
+        <div style={{ width:24, height:2, borderRadius:1, background:C.dark, overflow:"hidden" }}><div style={{ height:"100%", width:`${Math.max(0, Math.min(100, (g.npcState.colombiano.trust + 5) * 10))}%`, background: g.npcState.colombiano.trust > 0 ? C.orange : g.npcState.colombiano.trust < 0 ? C.pink : C.dim, transition:"width .5s ease" }} /></div>
+      </div>
     </div>}
   </div>}
 
   {/* Event Message */}
-  {g.evtMsg && <div style={{ margin: "4px 12px", padding: "8px 12px", background: C.dark + "cc", borderRadius: 6, border: "1px solid " + C.blue + "33", animation: "slideDown .3s ease-out" }}><div style={{ fontSize: 11, color: C.text, fontFamily: ftBody }}>{g.evtMsg}</div></div>}
+  {g.evtMsg && (() => { const em = g.evtMsg; const evtBorderColor = em.includes('🚔') || em.includes('🕵️') || em.includes('📡') || em.includes('🐀') ? C.pink : em.includes('🦈') || em.includes('👮') ? C.orange : em.includes('📟') || em.includes('💃') ? C.gold : em.includes('📦') || em.includes('💰') ? C.green : C.blue; return <div style={{ margin: "4px 12px", padding: "8px 12px", background: C.dark + "cc", borderRadius: 6, border: "1px solid " + evtBorderColor + "33", borderLeft: "3px solid " + evtBorderColor, animation: "slideDown .3s ease-out" }}><div style={{ fontSize: 11, color: C.text, fontFamily: ftBody }}>{g.evtMsg}</div></div>; })()}
 
   {/* Pager Deal Banner */}
   {/* ── ACTIVE POKER DEAL tracker ── */}
-  {g.activeDeal && <div style={{ margin: "4px 12px", padding: "10px 12px", background: C.gold + "18", borderRadius: 6, border: `1px solid ${C.gold}44` }}>
+  {g.activeDeal && (() => { const ds = g.activeDeal.step; const stepLabels = ["SETUP", "COMPLICATION", "TEMPTATION", "RESOLUTION"]; const riskColor = ds >= 3 ? C.pink : ds >= 2 ? C.orange : ds >= 1 ? C.gold : C.blue; return <div style={{ margin: "4px 12px", padding: "10px 12px", background: riskColor + "12", borderRadius: 6, border: `1px solid ${riskColor}44`, borderLeft: `3px solid ${riskColor}` }}>
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
       <div>
-        <div style={{ fontSize: 10, color: C.gold, fontFamily: ft, letterSpacing: 1 }}>🃏 DEAL IN PROGRESS</div>
+        <div style={{ fontSize: 10, color: riskColor, fontFamily: ft, letterSpacing: 1 }}>🃏 DEAL IN PROGRESS</div>
         <div style={{ fontSize: 9, color: C.text, marginTop: 2 }}>{g.activeDeal.qty}x {DRUGS[g.activeDeal.drugIdx]?.emoji} {DRUGS[g.activeDeal.drugIdx]?.name} → {LOCS[g.activeDeal.targetLoc]?.name}</div>
       </div>
-      <div style={{ fontSize: 9, color: C.dim }}>Step {g.activeDeal.step}/3</div>
+      <div style={{ textAlign: "right" }}>
+        <div style={{ fontSize: 9, color: riskColor, fontFamily: ft }}>{stepLabels[Math.min(ds, 3)]}</div>
+        <div style={{ fontSize: 8, color: C.dim }}>{ds}/3</div>
+      </div>
     </div>
-    <div style={{ display: "flex", gap: 2, marginTop: 4 }}>{[0,1,2,3].map(i => <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i <= g.activeDeal.step ? C.gold : C.border + '44' }} />)}</div>
-  </div>}
+    <div style={{ display: "flex", gap: 2, marginTop: 4 }}>{[0,1,2,3].map(i => <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i <= ds ? riskColor : C.border + '44', transition: "background .3s ease" }} />)}</div>
+  </div>; })()}
 
   {g.pagerDeal && g.move <= g.pagerDeal.expiresMove && (
     <div style={{ margin: "4px 12px", padding: "10px 12px", background: C.gold + "22", borderRadius: 6, border: "1px solid " + C.gold + "66", animation: "pulse 2s infinite" }}>
@@ -3163,16 +3177,16 @@ return <div style={{ …ctr, paddingBottom: 0, display: “flex”, flexDirectio
   <Neon color={C.blue} size={12} style={{ marginBottom: 8 }}>🎒 INVENTORY ({usedSp}/{g.coatSp})</Neon>
   {g.inv.every(q => q === 0) ? <div style={{ fontSize: 12, color: C.dim, textAlign: "center", padding: 20 }}>Your bag is empty</div> :
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {g.inv.map((q, i) => q > 0 && <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 10px", background: C.dark + "aa", borderRadius: 4, border: "1px solid " + C.border }}>
+      {g.inv.map((q, i) => { if (q <= 0) return null; const profitable = g.prices[i] > g.avgC[i]; const pnlColor = profitable ? C.green : C.pink; const pnlPct = g.avgC[i] > 0 ? Math.round(((g.prices[i] - g.avgC[i]) / g.avgC[i]) * 100) : 0; return <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 10px", background: C.dark + "aa", borderRadius: 4, border: "1px solid " + C.border, borderLeft: "3px solid " + pnlColor + "88" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 18 }}>{DRUGS[i].emoji}</span>
           <div><div style={{ fontSize: 12, color: C.text }}>{DRUGS[i].name}</div><div style={{ fontSize: 9, color: C.dim }}>Avg cost: {FM(g.avgC[i])}</div></div>
         </div>
         <div style={{ textAlign: "right" }}>
           <div style={{ fontSize: 14, color: C.blue, fontWeight: "bold" }}>x{q}</div>
-          <div style={{ fontSize: 9, color: g.prices[i] > g.avgC[i] ? C.green : C.pink }}>{g.prices[i] > g.avgC[i] ? "+" : ""}{FM(g.prices[i] - g.avgC[i])}/ea</div>
+          <div style={{ fontSize: 9, color: pnlColor, fontWeight: "bold" }}>{profitable ? "▲" : "▼"} {profitable ? "+" : ""}{FM(g.prices[i] - g.avgC[i])}/ea ({pnlPct > 0 ? "+" : ""}{pnlPct}%)</div>
         </div>
-      </div>)}
+      </div>; })}
     </div>}
   {g.gun && <div style={{ marginTop: 10, padding: "8px 10px", background: C.pink + "22", borderRadius: 4, display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontSize: 18 }}>🔫</span><span style={{ fontSize: 12, color: C.text }}>Piece (better fight odds)</span></div>}
 </div>}
@@ -3220,6 +3234,12 @@ return <div style={{ …ctr, paddingBottom: 0, display: “flex”, flexDirectio
 {/* ══ EMPIRE ══ */}
 {tab === "empire" && <div style={bx}>
   <Neon color={C.gold} size={12} style={{ marginBottom: 8 }}>🏴 EMPIRE</Neon>
+  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 4, marginBottom: 10, padding: "8px 10px", background: C.dark + "aa", borderRadius: 4, border: "1px solid " + C.border }}>
+    {LOCS.map((loc, i) => { const lv = g.turf[i]; return <div key={"tm"+i} style={{ textAlign: "center", padding: "4px 2px", borderRadius: 3, background: lv > 0 ? loc.color + "22" : "transparent", border: lv > 0 ? ("1px solid " + loc.color + "44") : "1px solid " + C.border + "44", opacity: lv > 0 ? 1 : .4 }}>
+      <div style={{ fontSize: 12 }}>{loc.icon}</div>
+      <div style={{ fontSize: 7, color: lv > 0 ? loc.color : C.dim, fontFamily: ft, letterSpacing: .5 }}>{lv > 0 ? TURF_LEVELS[lv].name.toUpperCase() : "—"}</div>
+    </div>; })}
+  </div>
   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
     {LOCS.map((loc, i) => {
       const lv = g.turf[i];
@@ -3247,11 +3267,12 @@ return <div style={{ …ctr, paddingBottom: 0, display: “flex”, flexDirectio
     {LIFESTYLE.map(item => {
       const owned = g.lifestyle.includes(item.effect);
       const displayCost = item.cost;
-      return <button key={item.effect} onClick={() => !owned && doBuyLife(item.effect)} disabled={owned || g.cash < displayCost}
-        style={{ ...bt(owned ? C.green : C.flamingo), padding: "10px 8px", opacity: owned ? .6 : g.cash >= displayCost ? 1 : .5, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-        <span style={{ fontSize: 24 }}>{item.icon}</span>
+      const canAfford = g.cash >= displayCost;
+      return <button key={item.effect} onClick={() => !owned && doBuyLife(item.effect)} disabled={owned || !canAfford}
+        style={{ ...bt(owned ? C.green : canAfford ? C.flamingo : C.dim), padding: "10px 8px", opacity: owned ? .7 : canAfford ? 1 : .3, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, position: "relative", boxShadow: owned ? `inset 0 0 20px ${C.green}11` : "none" }}>
+        <span style={{ fontSize: 24, filter: owned ? "none" : canAfford ? "none" : "grayscale(.8)" }}>{item.icon}</span>
         <span style={{ fontSize: 10 }}>{item.name}</span>
-        <span style={{ fontSize: 9, color: C.dim }}>{owned ? "OWNED" : FM(displayCost)}</span>
+        <span style={{ fontSize: 9, color: owned ? C.green : canAfford ? C.flamingo : C.pink }}>{owned ? "✓ OWNED" : FM(displayCost)}</span>
         <span style={{ fontSize: 8, color: C.dim }}>{item.desc}</span>
       </button>;
     })}
