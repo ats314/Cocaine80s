@@ -504,7 +504,10 @@ lines: [
 { text:“Maria finds you at the bar. She’s not smiling. "Crack. You’re selling crack now."”, portrait:‘angry’ },
 { text:”"I watched what that did to Overtown. Kids on corners. Mothers who can’t remember their own names. You want to get rich? Fine. But not like that. Not around me."”, portrait:‘angry’ },
 ],
-choices: [{ text:“It’s just business, Maria”, reaction:”"My mother said the same thing about the hotel. ‘It’s just work, Maria.’ It’s never just anything." She leaves her drink untouched. That’s how you know it’s serious.”, effects:{ ‘npc.maria.trust’:-2, flags:[‘maria_hates_crack’] } }],
+choices: [
+{ text:”It’s just business, Maria”, reaction:””My mother said the same thing about the hotel. ‘It’s just work, Maria.’ It’s never just anything.” She leaves her drink untouched. That’s how you know it’s serious.”, effects:{ ‘npc.maria.trust’:-2, flags:[‘maria_hates_crack’] } },
+{ text:”You’re right. I’ll stop.”, reaction:””You—“ She stops. Studies your face like she’s looking for the lie. Doesn’t find one. “Okay. Okay.” She picks up her drink. Takes a sip. “You know, César would never have said that. He would’ve laughed at me. You’re not him. I keep forgetting that’s a good thing.””, effects:{ ‘npc.maria.trust’:1, flags:[‘maria_hates_crack’,’quit_crack_for_maria’] } },
+],
 },
 
 // ════════════════════════════════════════════
@@ -852,10 +855,101 @@ choices: [{ text:“Watch her go”, reaction:“The gallery closes the next wee
 },
 
 // Colombiano reacts to being burned
-colombiano_betrayal_react: { speaker:‘narrator’, portrait:‘neutral’, priority:14,
-conditions: { flag:‘burned_colombiano’, notFlag:‘colombiano_betrayal_done’, dealsSinceGte:2 },
-lines: [{ text:“El Colombiano was arrested at dawn. Federal marshals. Three SUVs. The tiger was tranquilized and relocated to a zoo in Tampa. Colombiano’s attorney says it’s a "misunderstanding." The 47 kilos found in the pool house suggest otherwise. The streets know who talked. Your name isn’t safe anymore.” }],
-choices: [{ text:“x”, effects:{ ‘npc.colombiano.alive’:false, flags:[‘colombiano_betrayal_done’,‘colombiano_arrested’], cred:-15 } }],
+colombiano_betrayal_react: { speaker:’narrator’, portrait:’neutral’, priority:14,
+conditions: { flag:’burned_colombiano’, notFlag:’colombiano_betrayal_done’, dealsSinceGte:2 },
+lines: [{ text:”El Colombiano was arrested at dawn. Federal marshals. Three SUVs. The tiger was tranquilized and relocated to a zoo in Tampa. Colombiano’s attorney says it’s a “misunderstanding.” The 47 kilos found in the pool house suggest otherwise. The streets know who talked. Your name isn’t safe anymore.” }],
+choices: [{ text:”x”, effects:{ ‘npc.colombiano.alive’:false, flags:[‘colombiano_betrayal_done’,’colombiano_arrested’], cred:-15 } }],
+},
+
+// ════════════════════════════════════════════
+// DEEPER ARCS — Character backstory, lifestyle reactions
+// ════════════════════════════════════════════
+
+// Colombiano vulnerable moment — his family, why he left Colombia
+colombiano_personal: { speaker:’colombiano’, portrait:’amused’, priority:10,
+conditions: { ‘npc.colombiano.trust’:{gte:2}, flag:’colombiano_friendly’, credGte:35, notFlag:’colombiano_personal_done’, dealsSinceGte:3 },
+lines: [
+{ text:”El Colombiano is drunk. You’ve never seen him drunk. He’s sitting by the pool — the one shaped like Colombia — staring at the shallow end where Bogotá would be.”, portrait:’neutral’ },
+{ text:””My daughter turned seven today. Or maybe eight. I don’t know anymore. Her mother sends photos. I can’t open them.””, portrait:’neutral’ },
+{ text:””You know why I left? Not the police. Not the cartels. My brother. He was a teacher. A real one — chalk on his hands, terrible salary, happy. They killed him for his car. A 1979 Toyota. Not even a good car.””, portrait:’cold’ },
+{ text:””I decided that if the world was going to be cruel, I would be the one holding the knife. Not the other way around.” He finishes his drink. “Don’t feel sorry for me. Feel sorry for the people who made me necessary.””, portrait:’cold’ },
+],
+choices: [
+{ text:”That’s a hell of a reason”, reaction:””Every reason is a hell of a reason in Colombia.” He stands. Capitalism the tiger pads over and leans against his leg like a housecat. “I named him Capitalism because he eats everything in sight and feels nothing. I find it educational.” He almost smiles. Almost.”, effects:{ ‘npc.colombiano.trust’:2, flags:[‘colombiano_personal_done’] } },
+{ text:”You could still call her”, reaction:””And say what? ‘Happy birthday, your father is a narcotics trafficker who lives with a Bengal tiger in Miami’? Some things are kinder left unsaid.” He scratches Capitalism behind the ears. The tiger purrs. It’s the saddest sound you’ve ever heard.”, effects:{ ‘npc.colombiano.trust’:1, flags:[‘colombiano_personal_done’] } },
+],
+},
+
+// Maria bridge — trust 3, between launder and personal
+maria_rising: { speaker:’maria’, portrait:’knowing’, priority:9,
+conditions: { ‘npc.maria.trust’:{gte:3}, credGte:15, notFlag:’maria_rising_done’, dealsSinceGte:3 },
+lines: [
+{ text:”Maria meets you at the marina. She’s watching a yacht pull out — some banker’s boat, all teak and tax evasion.”, portrait:’neutral’ },
+{ text:””You’re getting big. That’s good and terrible. Good because money. Terrible because the bigger you get, the more people need you to fall.””, portrait:’knowing’ },
+{ text:””Ramirez needs a case. The Colombians need a scapegoat. The Cali people need a competitor to disappear. And everybody needs someone to blame when the music stops.””, portrait:’knowing’ },
+{ text:””I’m telling you this because—“ She stops. Watches the yacht. “Because I’d rather not attend your funeral. The catering is always terrible at those things.””, portrait:’amused’ },
+],
+choices: [
+{ text:”You worried about me?”, reaction:””Worried is a strong word. ‘Strategically concerned’ is more accurate.” She steals your sunglasses, puts them on. “Keep these. You’ll need them. The future is very bright, and very dangerous, and you should look good while it kills you.””, effects:{ ‘npc.maria.trust’:1, flags:[‘maria_rising_done’] } },
+{ text:”I can handle it”, reaction:””That’s what César said. César is currently decomposing in a cemetery in Hialeah.” A pause. “But sure. You can handle it.” She takes a sip of your coffee. “I’ll be at the gallery if you need someone to identify the body.””, effects:{ flags:[‘maria_rising_done’] } },
+],
+},
+
+// Maria reacts to your Countach
+maria_notices_lifestyle: { speaker:’maria’, portrait:’amused’, priority:7,
+conditions: { ‘npc.maria.met’:{eq:true}, ‘npc.maria.trust’:{gte:1}, lifestyleHas:’car’, notFlag:’maria_lifestyle_react’ },
+lines: [
+{ text:”Maria sees the Countach parked outside. She walks around it once. Twice. Runs a finger along the hood.”, portrait:’amused’ },
+{ text:””A Lamborghini. How wonderfully subtle. You might as well tattoo ‘DRUG MONEY’ on your forehead. At least the forehead tattoo is free.””, portrait:’knowing’ },
+{ text:””Every cop in Dade County is going to see this car and think ‘probable cause on wheels.’ Ramirez is going to love it. He’ll probably take a photo for his file.””, portrait:’amused’ },
+],
+choices: [
+{ text:”You like it though”, reaction:””It’s gorgeous. It’s also the dumbest purchase in the history of crime, and I say that as someone who once watched a man buy a gold-plated AK-47.” She opens the passenger door. “Take me to dinner. Somewhere expensive. If you’re going to be stupid, at least be stupid with company.””, effects:{ ‘npc.maria.trust’:1, flags:[‘maria_lifestyle_react’] } },
+{ text:”It’s an investment”, reaction:””In what? Your own arrest?” She laughs. It’s a real laugh. “Fine. Keep your investment. But when Ramirez pulls you over — and he will — remember that I told you so. I always tell you so. It’s my most attractive quality.””, effects:{ flags:[‘maria_lifestyle_react’] } },
+],
+},
+
+// Colombiano reacts to your visible rise
+colombiano_notices_lifestyle: { speaker:’colombiano’, portrait:’amused’, priority:7,
+conditions: { ‘npc.colombiano.met’:{eq:true}, ‘npc.colombiano.trust’:{gte:1}, totalProfitGte:75000, notFlag:’col_lifestyle_react’, dealsSinceGte:3 },
+lines: [
+{ text:”El Colombiano sends a gift basket. Inside: champagne, cigars, and a framed photo of Pablo Escobar’s bombed-out mansion.”, portrait:’amused’ },
+{ text:”The card reads: “Congratulations on your success. The champagne is to celebrate. The photo is to remind you how every celebration in this business eventually ends. Enjoy both. — E.C.””, portrait:’cold’ },
+{ text:””P.S. — I hear you bought some things. Good for you. Material possessions are the cocaine of the middle class. We sell the real thing, which I suppose makes us more honest.””, portrait:’amused’ },
+],
+choices: [
+{ text:”Cheers, Colombiano”, reaction:”You drink the champagne. It’s excellent. Of course it is. You look at the photo of the bombed mansion for a long time. Then you put it face-down in a drawer. Some things are better not stared at.”, effects:{ ‘npc.colombiano.trust’:1, flags:[‘col_lifestyle_react’] } },
+{ text:”Toss the photo”, reaction:”The champagne is excellent. The photo goes in the trash. You’ll think about endings later. Or never. Never works too.”, effects:{ flags:[‘col_lifestyle_react’] } },
+],
+},
+
+// ════════════════════════════════════════════
+// LATE-GAME FLAVOR — The world at $100K+
+// ════════════════════════════════════════════
+flav_coast_guard: { speaker:’narrator’, priority:2,
+conditions: { totalProfitGte:100000, notFlag:’f_coast’ },
+lines: [{ text:”📻 The Coast Guard intercepted a shrimp boat carrying 3 tons of cocaine. The captain claimed he was “just fishing.” His fishing rod was made of gold. The Coast Guard was not convinced.” }],
+choices: [{ text:”x”, effects:{ flags:[‘f_coast’] } }],
+},
+flav_congress: { speaker:’narrator’, priority:2,
+conditions: { totalProfitGte:150000, notFlag:’f_congress’ },
+lines: [{ text:”📻 Congress is debating the Anti-Drug Abuse Act. A senator who receives campaign donations from a pharmaceutical company that manufactures synthetic opioids gave an impassioned speech about “the scourge of illegal drugs.” Nobody laughed. Somebody should have.” }],
+choices: [{ text:”x”, effects:{ flags:[‘f_congress’] } }],
+},
+flav_dolphins: { speaker:’narrator’, priority:1,
+conditions: { totalProfitGte:120000, notFlag:’f_dolphins’ },
+lines: [{ text:”The Dolphins’ new defensive end drives a different Porsche every day of the week. His salary is $180,000. Nobody at the Herald writes the story. The Herald’s advertising manager drives a Porsche too.” }],
+choices: [{ text:”x”, effects:{ flags:[‘f_dolphins’] } }],
+},
+flav_cemetery: { speaker:’narrator’, priority:2,
+conditions: { totalProfitGte:200000, notFlag:’f_cemetery’ },
+lines: [{ text:”Woodlawn Cemetery ran out of plots. They’re expanding into what used to be a Little League field. “The children can play somewhere else,” said the director. “The dead are less flexible about relocation.”” }],
+choices: [{ text:”x”, effects:{ flags:[‘f_cemetery’] } }],
+},
+flav_realtor: { speaker:’narrator’, priority:1,
+conditions: { totalProfitGte:250000, notFlag:’f_realtor’ },
+lines: [{ text:”A real estate agent in Coral Gables sells $40 million in homes this quarter. Cash buyers only. She doesn’t ask questions. Her business card says “Dreams Made Real.” She means it more literally than her clients would like.” }],
+choices: [{ text:”x”, effects:{ flags:[‘f_realtor’] } }],
 },
 };
 const NPC_COLORS = { maria:C.flamingo, ramirez:C.blue, colombiano:C.orange, narrator:C.dim };
@@ -907,7 +1001,8 @@ if (k===‘evidenceGte’ && (s.npcState?.ramirez?.evidence||0)<v) return false;
 if (k===‘eraIs’ && (s.currentEra||0)!==v) return false;
 if (k===‘eraGte’ && (s.currentEra||0)<v) return false;
 if (k===‘dealsSinceGte’ && (s.dealsSinceLastEvent||0)<v) return false;
-if (k===‘turfCountGte’ && s.turf.filter(t=>t>0).length<v) return false;
+if (k===’turfCountGte’ && s.turf.filter(t=>t>0).length<v) return false;
+if (k===’lifestyleHas’ && !(s.lifestyle||[]).some(l=>l.effect===v)) return false;
 if (k.startsWith(‘npc.’)) {
 const p=k.split(’.’), nv=s.npcState?.[p[1]]?.[p[2]];
 if (typeof v===‘object’) {
