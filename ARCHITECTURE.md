@@ -200,6 +200,8 @@ Used in `STORY[id].conditions` and evaluated by `meetsConditions()` (line ~869):
 | `productIs` | string | Player's most-traded product matches |
 | `flag` | string | `s.storyFlags[v] === true` |
 | `notFlag` | string | `s.storyFlags[v] !== true` |
+| `lifestyleHas` | string | `s.lifestyle.some(l => l.effect === v)` — checks owned lifestyle items by effect name |
+| `turfCountGte` | number | `s.turf.filter(t=>t>0).length >= v` |
 | `npc.X.Y` | object | Nested NPC state check: `{ eq, gte, lte }` |
 
 ## Effect Types

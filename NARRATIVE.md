@@ -75,7 +75,9 @@ The game always starts with 5 comic panels, then Maria's brick deal:
 | `maria_party` | 10 | cred ≥10, trust ≥2, 3+ deals since event | Coral Gables mansion party, meet connected people (+5 cred) |
 | `maria_launder` | 9 | $30K profit, trust ≥2, cash ≥$8K | Art gallery laundering ($5K → $4.5K clean) |
 | `maria_personal` | 10 | cred ≥20, trust ≥4, Ramirez met | 3AM vulnerable moment, mother's story |
-| `maria_react_crack` | 7 | maria met, trust ≥0, selling crack | Maria confronts you about crack dealing (-2 trust) |
+| `maria_rising` | 9 | trust ≥3, cred ≥15, 3+ deals since | Marina warning — "the bigger you get, the more people need you to fall" |
+| `maria_react_crack` | 7 | maria met, trust ≥0, selling crack | Maria confronts about crack. Choice: dismiss (-2 trust) or agree to stop (+1 trust, `quit_crack_for_maria`) |
+| `maria_notices_lifestyle` | 7 | maria met, trust ≥1, has Countach | "Probable cause on wheels" — reacts to your car |
 
 **Maria flags:**
 - `maria_friendly_intro` — Positive first meeting
@@ -90,6 +92,9 @@ The game always starts with 5 comic panels, then Maria's brick deal:
 - `maria_close` — Close relationship
 - `maria_rejected` — Rejected personal connection
 - `maria_hates_crack` — Confronted about crack
+- `quit_crack_for_maria` — Promised to stop selling crack
+- `maria_rising_done` — Marina warning scene completed
+- `maria_lifestyle_react` — Reacted to Countach purchase
 - `maria_brick_debt` — Took 60/40 deal
 - `maria_negotiated` — Pushed for 50/50
 - `maria_gone` — Left Miami (after betrayal)
@@ -126,6 +131,8 @@ The game always starts with 5 comic panels, then Maria's brick deal:
 | `colombiano_second` | 10 | $40K profit, rejected, trust ≤0 | Second chance — supply deal or pay tax |
 | `colombiano_gift` | 10 | biggest deal ≥$10K, trust ≥1, friendly, 3+ deals since | Briefcase of cocaine |
 | `colombiano_zoo` | 10 | cred ≥25, trust ≥3, 3+ deals since | Compound visit, tiger, crack business |
+| `colombiano_personal` | 10 | trust ≥2, friendly, cred ≥35, 3+ deals since | Drunk by pool — brother killed for a Toyota, daughter's birthday, "Capitalism" the tiger |
+| `colombiano_notices_lifestyle` | 7 | met, trust ≥1, $75K profit, 3+ deals since | Gift basket: champagne + Escobar mansion photo |
 
 **Colombiano flags:**
 - `colombiano_friendly` — Accepted partnership
@@ -140,6 +147,8 @@ The game always starts with 5 comic panels, then Maria's brick deal:
 - `stayed_independent` — Refused crack business
 - `colombiano_arrested` — Arrested via informant arc
 - `colombiano_hit_survived` — Survived assassination (gun + cred 50)
+- `colombiano_personal_done` — Personal backstory scene completed
+- `col_lifestyle_react` — Reacted to player's visible wealth
 
 ### Faction Dispute Chain (Mid-Game)
 
@@ -215,6 +224,11 @@ The game always starts with 5 comic panels, then Maria's brick deal:
 | `flav_burger` | 2 | $50K profit | ME rents Burger King trailer |
 | `flav_doctor` | 1 | $30K profit | ME abbreviating cause of death |
 | `flav_vice` | 1 | 5+ deals, Miami Beach | Undercover detectives in Ferrari |
+| `flav_coast_guard` | 2 | $100K profit | Gold fishing rod cocaine bust |
+| `flav_dolphins` | 1 | $120K profit | Dolphins player, 7 Porsches on $180K salary |
+| `flav_congress` | 2 | $150K profit | Senator funded by pharma rails against "illegal drugs" |
+| `flav_cemetery` | 2 | $200K profit | Cemetery expanding into Little League field |
+| `flav_realtor` | 1 | $250K profit | Coral Gables agent, $40M quarter, cash only |
 
 ### Hoffman Encounter (Fuse Chain)
 
@@ -297,13 +311,13 @@ Planted silently, detonate after N moves:
 
 ## Content Statistics
 
-- **Total storylets:** 30 (in STORY object)
-- **Maria storylets:** 7 + brick deal + betrayal reaction
+- **Total storylets:** 37 (in STORY object)
+- **Maria storylets:** 10 + brick deal + betrayal reaction (added: rising, lifestyle react, crack choice fix)
 - **Ramirez storylets:** 5 + first bust reaction
-- **Colombiano storylets:** 5 + notice + betrayal reaction
+- **Colombiano storylets:** 7 + notice + betrayal reaction (added: personal, lifestyle react)
 - **Faction chain:** 4 storylets
 - **Informant chain:** 3 storylets
-- **Milestone/flavor:** 13 storylets
+- **Milestone/flavor:** 18 storylets (added: 5 late-game $100K+)
 - **Narrative openers:** 21 (3 per 7 endings)
 - **Narrative beats:** 13 templates
 - **Newspaper headlines:** 15
