@@ -145,12 +145,22 @@ const COACH_MARKS = [
 { id:“travel_tip”, text:“Prices change by location →”, trigger:“first_buy”, dismiss:“timer”, timerMs:4000 },
 { id:“new_loc”,    text:“Prices are different here”, trigger:“first_travel”, dismiss:“open_market” },
 { id:“sell_high”,  text:“This sells for more here 📈”, trigger:“profitable_item”, dismiss:“first_sell” },
-{ id:“heat_warn”,  text:“Heat rises when you deal big ⚠️”, trigger:“first_police”, dismiss:“timer”, timerMs:3000 },
+{ id:”heat_warn”,  text:”Heat rises when you deal big ⚠️”, trigger:”first_police”, dismiss:”timer”, timerMs:3000 },
+{ id:”qte_hint”,   text:”Try ESCAPE for a QTE mini-game ⚡”, trigger:”first_police”, dismiss:”timer”, timerMs:4000 },
 { id:”loan_help”,  text:”Need cash? Pay off debt in Bank 🦈”, trigger:”first_broke”, dismiss:”timer”, timerMs:4000 },
 { id:”enc_intro”,  text:”Random encounter — read carefully ⚡”, trigger:”first_encounter”, dismiss:”timer”, timerMs:3000 },
 { id:”deal_intro”, text:”Multi-step deal — choices matter 🤝”, trigger:”first_deal”, dismiss:”timer”, timerMs:3500 },
 { id:”defuse_hint”,text:”Pay now or face consequences later 💣”, trigger:”first_defuse”, dismiss:”timer”, timerMs:3500 },
 ];
+
+// ── QTE (Quick Time Events) — Timed action sequences ──
+const QTE_SEQUENCES = [
+["←","→","←"],         // Easy (3 inputs)
+["→","↑","←","→"],     // Medium (4 inputs)
+["↑","←","↓","→","↑"], // Hard (5 inputs)
+]
+const QTE_KEYS = { ArrowLeft:"←", ArrowRight:"→", ArrowUp:"↑", ArrowDown:"↓", a:"←", d:"→", w:"↑", s:"↓" }
+const QTE_TIME_MS = [4000, 3500, 3000] // Time limit per difficulty
 
 const COMIC_PANELS = [
 { bg:“linear-gradient(180deg,#0a0818 0%,#1a0a30 20%,#e87040 55%,#f0a030 75%,#060E1A 100%)”, text:“MIAMI. AUGUST 1980.”, sub:“The cocaine cowboys just started the party.”, icon:“🌴” },
@@ -1748,6 +1758,35 @@ resultText, effects,
 };
 }
 
+function processQTE(s, success) {
+const effects = [];
+if (success) {
+// Perfect escape — keep all inventory, gain cred, reduce heat
+effects.push({ type: 'SFX', name: 'qteWin' }, { type: 'FLASH', color: C.green + '44' },
+{ type: 'SPAWN', text: 'CLEAN GETAWAY!', color: C.green, size: 18 });
+const achs = […s.achievements];
+if (!achs.includes("qte_escape")) { achs.push("qte_escape"); effects.push({ type: 'ACHIEVEMENT', id: 'qte_escape' }); }
+return {
+state: { …s, fedHeat: Math.max(0, s.fedHeat - 8), cred: Math.min(100, s.cred + 5), achievements: achs,
+montage: […s.montage, { move: s.move, text: "Outran the vice squad — clean getaway." }] },
+resultText: "You weaved through alleys like a ghost. They never had a chance.",
+effects,
+};
+} else {
+// Failed QTE — worse than normal run (you tried and failed)
+const hpLoss = R(15, 30);
+const lostInv = s.inv.map(q => Math.floor(q * .4));
+effects.push({ type: 'SHAKE' }, { type: 'FLASH', color: C.pink + '66' },
+{ type: 'SPAWN', text: `CAUGHT! -${hpLoss} HP`, color: C.pink, size: 16 });
+return {
+state: { …s, hp: Math.max(0, s.hp - hpLoss), inv: lostInv, fedHeat: Math.min(100, s.fedHeat + 3),
+montage: […s.montage, { move: s.move, text: "Tried to run. Didn't make it." }] },
+resultText: `You stumbled. They caught you. -${hpLoss} HP, lost most of your stash.`,
+effects,
+};
+}
+}
+
 function processBuyTurf(s, locIdx) {
 const nextLv = s.turf[locIdx] + 1;
 if (nextLv >= TURF_LEVELS.length) return { state: s, ok: false };
@@ -1923,6 +1962,10 @@ achieve: () => [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => playTone
 coin: () => playTone(1568, .08, “sine”, .06),
 pager: () => { playTone(1200, .05, “square”, .04); setTimeout(() => playTone(1200, .05, “square”, .04), 100); setTimeout(() => playTone(1400, .08, “square”, .05), 200); },
 streak: () => { [523, 659, 784, 1047, 1319].forEach((f, i) => setTimeout(() => playTone(f, .12, “triangle”, .06), i * 60)); },
+qteHit: () => playTone(880, .06, “triangle”, .08),
+qteMiss: () => { playTone(220, .15, “sawtooth”, .06); setTimeout(() => playTone(165, .2, “sawtooth”, .05), 100); },
+qteWin: () => { [784, 1047, 1319, 1568].forEach((f, i) => setTimeout(() => playTone(f, .12, “triangle”, .08), i * 70)); },
+qteTick: () => playTone(1200, .03, “square”, .03),
 upgrade: () => { playChord([392, 523, 659], .2, “sine”, .08); setTimeout(() => playChord([523, 659, 784], .3, “sine”, .10), 200); },
 };
 
@@ -2386,6 +2429,8 @@ const [npcEvent, setNpcEvent] = useState(null);
 const [policeResultText, setPoliceResultText] = useState("");
 const [dealEvt, setDealEvt] = useState(null); // Poker deal step events
 const [saleBreakdown, setSaleBreakdown] = useState(null);
+const [qte, setQte] = useState(null); // { seq, inputIdx, timeLeft, startTime, difficulty, failed }
+const qteTimerRef = useRef(null);
 const [streakBorder, setStreakBorder] = useState(false);
 const [eraTransition, setEraTransition] = useState(null);
 const [comicIdx, setComicIdx] = useState(0);
@@ -2446,7 +2491,7 @@ return “hudReveal .5s ease-out”;
 
 // Synth engine
 useEffect(() => {
-if (screen === “game”) {
+if (screen === “game” || screen === “qte”) {
 synthEngine.start();
 synthEngine.update(g.fedHeat, era.name, isNight);
 } else {
@@ -2564,6 +2609,8 @@ setTab(“market”);
 setSelDrug(null);
 setCoachShown({});
 setCoachActive(null);
+setQte(null);
+if (qteTimerRef.current) clearInterval(qteTimerRef.current);
 setTimeout(() => showCoach(“tap_drug”), 500);
 hudAnimated.current = {};
 unlockNotifs.current.clear();
@@ -2601,6 +2648,7 @@ if (hasProfitable) showCoach(“sell_high”);
 // Check for police encounter — show heat warning
 const hadPolice = result.effects?.some(e => e.type === “SCREEN” && e.screen === “police”);
 if (hadPolice && !coachShown[“heat_warn”]) showCoach(“heat_warn”);
+if (hadPolice && coachShown[“heat_warn”] && !coachShown[“qte_hint”]) showCoach(“qte_hint”);
 // Check broke
 if (result.state.cash < 200 && result.state.inv.reduce((a,b) => a+b, 0) === 0 && !coachShown[“loan_help”]) showCoach(“loan_help”);
 // ── NARRATIVE: check storylets, store in game state directly ──
@@ -2625,6 +2673,76 @@ const doBuy = () => { if (selDrug === null || !trAmt) return; const r = act(proc
 const doSell = () => { if (selDrug === null || !trAmt) return; const r = act(processSellDrug, selDrug, parseInt(trAmt) || 0); if (r.ok) { dismissCoach(“first_sell”); const _st2 = selectStorylet(r.state); if (_st2 && _st2.speaker !== ‘narrator’) setG(prev => ({ …prev, activeStorylet: { id:_st2.id, speaker:_st2.speaker, portrait:_st2.lines[0]?.portrait||_st2.portrait, lines:_st2.lines, choices:_st2.choices, lineIdx:0, ready:false } })); } setTrAmt(””); setTrMode(null); };
 const doPolice = (action) => { const r = act(processPolice, action); setPoliceResultText(r.resultText || “”); setScreen(“policeResult”); setTimeout(() => setScreen(“game”), 2500); };
 const dismissPolice = () => setScreen(“game”);
+// ── QTE HANDLERS ──
+const startQTE = () => {
+const diff = g.fedHeat >= 60 ? 2 : g.fedHeat >= 30 ? 1 : 0;
+const seq = QTE_SEQUENCES[diff];
+const timeMs = QTE_TIME_MS[diff];
+const startTime = Date.now();
+setQte({ seq, inputIdx: 0, timeLeft: timeMs, startTime, difficulty: diff, failed: false });
+setScreen(“qte”);
+SFX.police();
+if (qteTimerRef.current) clearInterval(qteTimerRef.current);
+qteTimerRef.current = setInterval(() => {
+setQte(prev => {
+if (!prev || prev.failed) return prev;
+const elapsed = Date.now() - prev.startTime;
+const remaining = Math.max(0, QTE_TIME_MS[prev.difficulty] - elapsed);
+if (remaining <= 0) {
+clearInterval(qteTimerRef.current);
+// Time's up — fail
+SFX.qteMiss();
+return { …prev, timeLeft: 0, failed: true };
+}
+if (remaining < 1500 && remaining % 400 < 60) SFX.qteTick();
+return { …prev, timeLeft: remaining };
+});
+}, 50);
+};
+const resolveQTE = useCallback((success) => {
+clearInterval(qteTimerRef.current);
+const r = processQTE(g, success);
+setG(r.state);
+processEffects(r.effects);
+setPoliceResultText(r.resultText || “”);
+setTimeout(() => { setScreen(“policeResult”); setTimeout(() => setScreen(“game”), 2500); }, success ? 600 : 800);
+}, [g]);
+const handleQTEInput = useCallback((key) => {
+setQte(prev => {
+if (!prev || prev.failed || prev.resolved) return prev;
+const expected = prev.seq[prev.inputIdx];
+const pressed = QTE_KEYS[key];
+if (!pressed) return prev;
+if (pressed === expected) {
+SFX.qteHit();
+const nextIdx = prev.inputIdx + 1;
+if (nextIdx >= prev.seq.length) {
+resolveQTE(true);
+return { …prev, inputIdx: nextIdx, resolved: true };
+}
+return { …prev, inputIdx: nextIdx };
+} else {
+SFX.qteMiss();
+resolveQTE(false);
+return { …prev, failed: true, resolved: true };
+}
+});
+}, [resolveQTE]);
+useEffect(() => {
+if (screen !== “qte”) return;
+const handler = (e) => { if ([“ArrowUp”,”ArrowDown”,”ArrowLeft”,”ArrowRight”,”w”,”a”,”s”,”d”].includes(e.key)) { e.preventDefault(); handleQTEInput(e.key); } };
+window.addEventListener(“keydown”, handler);
+return () => window.removeEventListener(“keydown”, handler);
+}, [screen, handleQTEInput]);
+useEffect(() => () => { if (qteTimerRef.current) clearInterval(qteTimerRef.current); }, []);
+// QTE timeout resolution
+useEffect(() => {
+if (qte && qte.timeLeft <= 0 && !qte.resolved) {
+SFX.qteMiss();
+setQte(prev => prev ? { …prev, failed: true, resolved: true } : prev);
+resolveQTE(false);
+}
+}, [qte?.timeLeft, qte?.resolved]);
 // ── DIALOGUE HANDLERS ──
 const advanceDialogue = () => {
 if (!g.activeStorylet) return;
@@ -2848,6 +2966,7 @@ return <div style={{ …ctr, animation: “bustedFlash .6s ease-out, bigShake .5
 <Neon color={C.pink} size={22}>BUSTED!</Neon>
 <p style={{ fontSize: 13, color: C.dim, marginBottom: 6, marginTop: 8, lineHeight: 1.6 }}>Vice squad spotted you in {LOCS[g.loc].name}!<br /><span style={{ fontSize: 11 }}>Era: {era.name} · Penalty: {era.penaltyMod}x</span></p>
 <div style={{ display: “flex”, flexDirection: “column”, gap: 8, width: “100%”, maxWidth: 280, marginTop: 10 }}>
+<button onClick={() => startQTE()} style={bt(C.green, C.green)}>⚡ ESCAPE (QTE)</button>
 <button onClick={() => doPolice(“run”)} style={bt(C.blue)}>🏃 RUN</button>
 <button onClick={() => doPolice(“fight”)} style={bt(C.pink)}>{g.gun ? “🔫” : “👊”} FIGHT</button>
 <button onClick={() => doPolice(“bribe”)} disabled={g.cash < 500} style={{ …bt(C.gold), opacity: g.cash >= 500 ? 1 : .4 }}>💰 BRIBE</button>
@@ -2865,6 +2984,46 @@ return <div style={{ …ctr }}><style>{CSS}</style>{vhsOverlay}
 {policeResultText && <div style={{ fontSize: 13, color: C.text, marginTop: 8, marginBottom: 8, lineHeight: 1.6, maxWidth: 300, fontFamily: ftBody }}>{policeResultText}</div>}
 <div style={{ fontSize: 12, color: C.pink, marginBottom: 14 }}>HP: {g.hp}/100</div>
 <button onClick={dismissPolice} style={bt(C.green, C.green)}>CONTINUE</button>
+</div>
+</div>;
+}
+// ═══════ QTE — Quick Time Event ═══════
+if (screen === "qte" && qte) {
+const pct = qte.timeLeft / QTE_TIME_MS[qte.difficulty] * 100;
+const completed = qte.inputIdx >= qte.seq.length;
+const timerColor = pct > 50 ? C.green : pct > 25 ? C.orange : C.pink;
+return <div style={{ …ctr, animation: "bustedFlash .6s ease-out" }}><style>{CSS}</style>{vhsOverlay}
+<div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", padding: 30, textAlign: "center" }}>
+<div style={{ fontSize: 36, marginBottom: 8, animation: "shake .5s ease" }}>🚔</div>
+<Neon color={C.blue} size={18} flicker>ESCAPE!</Neon>
+<p style={{ fontSize: 11, color: C.dim, marginTop: 6, marginBottom: 16 }}>Hit the arrows in order to escape!</p>
+{/* Timer bar */}
+<div style={{ width: "100%", maxWidth: 280, height: 6, background: C.dark, borderRadius: 3, marginBottom: 20, overflow: "hidden", border: `1px solid ${timerColor}44` }}>
+<div style={{ height: "100%", width: `${pct}%`, background: `linear-gradient(90deg, ${timerColor}, ${timerColor}cc)`, borderRadius: 3, transition: "width .1s linear", boxShadow: `0 0 8px ${timerColor}66` }} />
+</div>
+{/* Arrow sequence */}
+<div style={{ display: "flex", gap: 12, justifyContent: "center", marginBottom: 20 }}>
+{qte.seq.map((arrow, i) => {
+const done = i < qte.inputIdx;
+const current = i === qte.inputIdx && !qte.failed && !completed;
+const missed = qte.failed && i === qte.inputIdx;
+const bg = done ? C.green : missed ? C.pink : current ? C.blue : C.dark;
+const borderC = done ? C.green : missed ? C.pink : current ? C.blue : C.border;
+const scale = current ? "scale(1.3)" : done ? "scale(1)" : "scale(.9)";
+return <div key={i} style={{ width: 52, height: 52, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, fontFamily: ft, color: done ? "#fff" : missed ? "#fff" : current ? "#fff" : C.dim, background: `linear-gradient(180deg, ${bg}33, ${bg}11)`, border: `2px solid ${borderC}`, boxShadow: current ? `0 0 16px ${C.blue}66, 0 0 32px ${C.blue}33` : done ? `0 0 8px ${C.green}44` : "none", transform: scale, transition: "all .15s ease", animation: current ? "neonPulse 1.5s ease-in-out infinite" : done ? "scalePunch .3s ease-out" : "none" }}>{arrow}</div>;
+})}
+</div>
+{/* Mobile touch buttons */}
+<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gridTemplateRows: "1fr 1fr", gap: 8, width: 200, margin: "0 auto" }}>
+<div />
+<button onClick={() => handleQTEInput("ArrowUp")} disabled={qte.failed || completed} style={{ …bt(C.blue), fontSize: 18, padding: "12px 0", opacity: qte.failed || completed ? .3 : 1 }}>↑</button>
+<div />
+<button onClick={() => handleQTEInput("ArrowLeft")} disabled={qte.failed || completed} style={{ …bt(C.blue), fontSize: 18, padding: "12px 0", opacity: qte.failed || completed ? .3 : 1 }}>←</button>
+<button onClick={() => handleQTEInput("ArrowDown")} disabled={qte.failed || completed} style={{ …bt(C.blue), fontSize: 18, padding: "12px 0", opacity: qte.failed || completed ? .3 : 1 }}>↓</button>
+<button onClick={() => handleQTEInput("ArrowRight")} disabled={qte.failed || completed} style={{ …bt(C.blue), fontSize: 18, padding: "12px 0", opacity: qte.failed || completed ? .3 : 1 }}>→</button>
+</div>
+{qte.failed && <div style={{ marginTop: 16, animation: "fadeIn .3s ease-out" }}><Neon color={C.pink} size={14}>CAUGHT!</Neon></div>}
+{completed && <div style={{ marginTop: 16, animation: "scalePunch .6s ease-out" }}><Neon color={C.green} size={14}>CLEAN GETAWAY!</Neon></div>}
 </div>
 </div>;
 }
