@@ -2,7 +2,7 @@
 
 ## Overview
 
-Single-file (~3,630 lines, 259KB) React game engine implementing a Miami Vice-themed drug dealing empire simulation. Ambitious and well-crafted with deep game systems, outstanding narrative writing, and sophisticated visual/audio design.
+Single-file (~3,200 lines) React game engine implementing a Miami Vice-themed drug dealing empire simulation. Ambitious and well-crafted with deep game systems, outstanding narrative writing, and sophisticated visual/audio design.
 
 ---
 
@@ -29,73 +29,43 @@ HUD reveals stats only after the player encounters the mechanic. Coach marks tea
 
 ---
 
-## Critical Bugs
+## Resolved Issues (Previously Critical)
 
-### 1. `dealsSinceLastEvent` is never incremented (line 1292)
+The following bugs from the original review have been verified as **already fixed or false alarms**:
 
-Initialized to 0 in `createInitialState` but **never incremented** anywhere. Many storylets require `dealsSinceGte: 2` or `dealsSinceGte: 3`, so these conditions always fail (0 < 2). This breaks **most NPC storylets**:
+### ~~1. `dealsSinceLastEvent` never incremented~~
+**Status: Working correctly.** Counter is incremented in `processBuyDrug` and `processSellDrug`, and reset to 0 when a storylet fires.
 
-- `maria_tip`, `maria_party`, `maria_launder`
-- `ramirez_coffee`, `ramirez_photos`, `ramirez_offer`, `ramirez_bribe`
-- `colombiano_gift`, `colombiano_zoo`
-- `faction_dispute` and all faction downstream events
-- All informant arc events
+### ~~2. `fedHeatGte` condition not handled~~
+**Status: Working correctly.** Handler exists in `meetsConditions` for both `heatGte` and `fedHeatGte`.
 
-**Fix:** Increment in `processBuyDrug`/`processSellDrug`, reset to 0 when a storylet fires.
+### ~~3-4. Meta-progression not persisted / No pre-game selection UI~~
+**Status: Removed.** The playbook, heat ladder, safehouse upgrades, daily challenge, and meta-progression systems have been removed from the codebase entirely. These were engine-ready but had no UI.
 
-### 2. `fedHeatGte` condition not handled in `meetsConditions` (lines 1009-1046)
+### ~~5. `got_failure_bonus` flag never set~~
+**Status: Working correctly.** Flag is set in the same `processTravel` call via `newFlags.got_failure_bonus = true`.
 
-The evaluator handles `heatGte` (line 1015) but `ramirez_intro` uses `fedHeatGte` (line 648). Unrecognized keys are silently skipped, so Ramirez appears immediately after 2 deals instead of waiting for heat >= 15.
+### ~~7. Police result text never displayed~~
+**Status: Working correctly.** `policeResultText` is stored in state and displayed on the police result screen.
 
-**Fix:** Add `if (k==='fedHeatGte' && s.fedHeat<v) return false;` or rename to `heatGte`.
+### ~~8. Shallow copy mutation in `applyPlaybookMods`~~
+**Status: Removed.** Function no longer exists.
 
-### 3. Meta-progression is never persisted (lines 2537, 2754)
-
-`saveMeta()` exists but is **never called**. All meta-progression (rep, upgrades, unlocked playbooks) is lost on page reload.
-
-### 4. Game always starts with default settings (line 2740)
-
-`startGame` hardcodes `PLAYBOOKS[0]` and heat level 0. Despite fully implemented PLAYBOOKS, HEAT_LADDER, daily challenge, and safehouse upgrade systems, there is **no UI to select them**.
-
-### 5. `got_failure_bonus` flag never set (line 1455)
-
-The failure bonus checks the flag but never sets it. The "one-time" lifeline triggers every eligible travel.
+### ~~10. `getDailyModifiers` shuffle non-deterministic~~
+**Status: Removed.** Daily challenge system no longer exists.
 
 ---
 
-## Moderate Bugs
+## Remaining Issues
 
-### 6. Supplier betrayal flag races with random roll (lines 1688, 1795)
-Flag set unconditionally, but message/effect behind `Math.random() < 0.3`. 70% of the time the flag silently blocks future triggers.
+### 1. Supplier betrayal flag races with random roll
+Flag is set unconditionally when `supplierFlipped` is true, but the flip itself is behind `Math.random() < 0.3`. When the conditions are met but the random check fails (70% of the time), the flag is NOT set, so the check retries on subsequent travels. This is technically correct but could be surprising — the player may get betrayed later when they've forgotten about the original risk.
 
-### 7. Police result text never displayed (lines 1957, 3044)
-`processPolice` generates `resultText` but the UI only shows HP.
-
-### 8. Shallow copy mutation in `applyPlaybookMods` (line 1198)
-`state.turf[loc] = mods.startTurf` mutates through shallow copy. Safe now but fragile.
-
-### 9. `SynthEngine._loop()` recomputes constants twice (lines 2166, 2234)
-`sc` and `beatMs` computed inside try block, then again outside it.
-
-### 10. `getDailyModifiers` shuffle is non-deterministic (line 257)
-Sort comparator with side effects produces browser-dependent results from same seed.
-
----
-
-## Missing Features (Designed but Not Wired)
-
-| Feature | Engine Code | UI | Status |
-|---------|------------|-----|--------|
-| Playbook selection | Complete | Missing | Always starts as Hustler |
-| Heat level selection | Complete | Missing | Always Tourist difficulty |
-| Daily challenges | Complete | Missing | Seed generation works, no entry point |
-| Safehouse upgrades (meta) | Complete | Missing | Buy with rep between runs |
-| Rep economy | Complete | Missing | Calculated but never saved |
-| Stash system | Partial | Missing | `stashInv` exists, no deposit/withdraw UI |
-| Completion grid | Defined | Missing | Track playbook x heat combos |
+### ~~2. Witness defuse mechanic not wired~~
+**Status: Fixed.** The witness defuse encounter now appears as a random encounter (40% chance per travel while fuse is active). Players can pay $2K to silence the witness.
 
 ---
 
 ## Summary
 
-Impressive work -- deeply systemic game with excellent writing, wrapped in polished audiovisual package. Core architecture (pure state transitions, declarative storylets, action-driven progression) is well-designed. Main issue: ~40% of designed features are implemented in the engine but never exposed due to missing UI and counter bugs. Fixing the 5 critical bugs and adding the pre-game selection screen would dramatically expand playable content that already exists.
+Impressive work — deeply systemic game with excellent writing, wrapped in polished audiovisual package. Core architecture (pure state transitions, declarative storylets, action-driven progression) is well-designed. Most previously reported critical bugs were false alarms. The codebase has been simplified by removing ~400 lines of unimplemented systems (playbooks, heat ladder, safehouse upgrades, daily challenges, meta-progression, stash).

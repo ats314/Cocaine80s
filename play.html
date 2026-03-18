@@ -1,4 +1,21 @@
-import { useState, useEffect, useCallback, useRef, useMemo, memo } from “react”;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>COCAINE 80s</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body, #root { width: 100%; height: 100%; overflow: hidden; background: #060E1A; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script type="text/babel" data-type="module">
+const { useState, useEffect, useCallback, useRef, useMemo, memo } = React;
 
 // ╔═══════════════════════════════════════════════════════════════╗
 // ║  PORTABLE GAME ENGINE — Cut here for React Native port       ║
@@ -3616,3 +3633,8 @@ return <div style={{ …ctr, paddingBottom: 0, display: “flex”, flexDirectio
 
   </div>;
 }
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(Cocaine80s));
+</script>
+</body>
+</html>
