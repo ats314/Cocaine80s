@@ -25,8 +25,7 @@ This is a **single-file React game** (`cocaine80master`, ~3,630 lines). The enti
 - **Compressed helpers**: `R`, `RF`, `FM`, `CL` are intentionally terse (they're called hundreds of times)
 - **Inline styles**: All CSS is CSS-in-JS. No external stylesheets
 - **Spread-return pattern**: State transitions return `{ state: {...s, ...changes}, effects: [...] }`
-- **No semicolons at end of const declarations** in data sections — this is intentional
-- **Unicode spread operator**: The file uses `…` (Unicode ellipsis, U+2026) not `...` (three dots) in spread syntax
+- **Straight quotes only**: `"` `'` for string delimiters, `...` for spread. Curly quotes (`“ ” ‘ ’`) and `…` are only ever *content* inside a string — never syntax. Do not let an editor or paste path apply "smart punctuation" to this file; it silently produces source that no parser will accept (see `tools/repair-smart-quotes.js`)
 
 ### Architecture Layers
 ```
@@ -135,7 +134,7 @@ Tabs within `game`: market, bag, travel, bank, empire, life
 
 ## Common Pitfalls
 
-1. **Unicode spread**: The file uses `…` not `...`. If you paste code with `...`, it will look inconsistent but still work. Match the existing style.
+1. **Smart punctuation breaks the build**: If `…` or curly quotes appear where syntax belongs (`const C = {pink:”#FF2D7B”}`), the file will not parse at all. Run `node tools/repair-smart-quotes.js <in> <out>` to repair, then verify with a parser before committing.
 
 2. **Shallow copies**: State updates use `{ …s, ... }` which is shallow. Nested objects (like `npcState`, `turf`, `enforcers`) need their own spread when modified.
 
