@@ -272,6 +272,637 @@ const calcTxRisk=(amt,baseRisk,eraCopsMod)=>{
 const calcLegalFees=(txValue,eraPenaltyMod,mod=1)=>Math.max(100,Math.floor((txValue*0.2*eraPenaltyMod+R(200,800))*mod));
 const getEra=s=>ERAS[s.currentEra||0];
 
+// ═══════════════════════════════════════════════════════════════
+// LIVING CITY ENGINE — pure. Per-district demand, telegraphed supply
+// shocks, patrol pressure, informants, crew loyalty, laundering, and
+// a rival kingpin who plays the whole game against you.
+// Every function takes state and returns new state or plain data.
+// ═══════════════════════════════════════════════════════════════
+const LOC_COUNT=LOCS.length;
+
+const MKT={
+  sellHit:0.009, buyDrain:0.005, demFloor:0.40, demCeil:1.45, recover:0.16,
+  mktLo:0.30, mktHi:2.40,
+  shockChance:0.26, shockCap:3,
+  patrolMax:6, patrolDecay:0.55, patrolPerTrade:0.7,
+  infMax:5, infGain:0.50, infDecay:0.20,
+  wireKeep:6,
+};
+
+const initLocDemand=()=>LOCS.map(()=>DRUGS.map(()=>1));
+const initPatrols=()=>LOCS.map(l=>Math.round(l.heat*100)/10);
+const initInformants=()=>LOCS.map(()=>0);
+const initRival=()=>({ power:5, cash:30000, heat:0, truce:0, confront:0, broken:false,
+  flood:null, hitFuse:0, raids:0, lastAction:"build",
+  lastText:"Counting money somewhere south of you." });
+const pushWire=(wire,item)=>[item,...(wire||[])].slice(0,MKT.wireKeep);
+
+// ── SUPPLY SHOCKS — announced one move before they land ──
+const SHOCK_KINDS=[
+  { kind:"spike", icon:"🚢", mult:[1.45,2.05],
+    warn:"WIRE: Coast Guard is staging cutters off {L}. {D} there gets thin by morning.",
+    landed:"Interdiction off {L} — {D} is scarce and expensive." },
+  { kind:"spike", icon:"🚔", mult:[1.40,1.90],
+    warn:"WIRE: Vice is prepping a sweep in {L}. Every connect there will sit on their hands.",
+    landed:"Vice swept {L}. {D} is hard to find at any price." },
+  { kind:"spike", icon:"🎉", mult:[1.35,1.75],
+    warn:"WIRE: A convention books out {L} this week. Somebody there is going to want {D}.",
+    landed:"{L} is full of out-of-towners. {D} moves at a premium." },
+  { kind:"crash", icon:"📦", mult:[0.52,0.72],
+    warn:"WIRE: A go-fast unloads tonight. {D} is about to flood {L}.",
+    landed:"{D} is everywhere in {L}. Buyers are picky and prices are ugly." },
+  { kind:"crash", icon:"🇨🇴", mult:[0.48,0.68],
+    warn:"WIRE: The cartel is clearing inventory before the season. {D} will crater in {L}.",
+    landed:"Cartel dumping killed the {D} price in {L}." },
+  { kind:"crash", icon:"⚔", mult:[0.55,0.78],
+    warn:"WIRE: Two crews in {L} are undercutting each other over {D}. It gets cheap before it gets bloody.",
+    landed:"Price war on {D} in {L}. Cheap to buy. Miserable to sell." },
+];
+const rollShock=()=>{
+  const t=SHOCK_KINDS[R(0,SHOCK_KINDS.length-1)];
+  const drug=R(0,DRUG_COUNT-1);
+  const citywide=Math.random()<0.22;
+  const loc=citywide?-1:R(0,LOC_COUNT-1);
+  const where=citywide?"Miami":LOCS[loc].name;
+  const fill=str=>str.replace("{D}",DRUGS[drug].name).replace("{L}",where);
+  return { kind:t.kind, icon:t.icon, drug, loc, pending:true, moves:R(2,4),
+    mult:Math.round(RF(t.mult[0],t.mult[1])*100)/100,
+    warn:fill(t.warn), landed:fill(t.landed) };
+};
+
+// ── MARKET MICROSTRUCTURE ──
+// Local demand (what THIS district will still absorb), live shocks and the
+// rival flooding a corner all fold into one capped multiplier per drug.
+const shockMultAt=(shocks,loc,drugIdx)=>{
+  let m=1;
+  for(const sk of (shocks||[])){
+    if(sk.pending||sk.drug!==drugIdx) continue;
+    if(sk.loc>=0&&sk.loc!==loc) continue;
+    m*=sk.mult;
+  }
+  return m;
+};
+const marketMult=(s,loc,drugIdx)=>{
+  const row=(s.locDemand||[])[loc];
+  let m=row?CL(row[drugIdx],MKT.demFloor,MKT.demCeil):1;
+  m*=shockMultAt(s.shocks,loc,drugIdx);
+  const fl=s.rival&&s.rival.flood;
+  if(fl&&fl.loc===loc&&fl.drug===drugIdx&&(s.move||0)<fl.until) m*=0.84;
+  return CL(m,MKT.mktLo,MKT.mktHi);
+};
+// Mutates the freshly generated price row in place so history, sparklines,
+// buy price and sell price all agree. Called once per travel.
+const applyMarketPrices=(s,loc,prices)=>{
+  for(let i=0;i<prices.length;i++)
+    prices[i]=Math.max(DRUGS[i].min,Math.round(prices[i]*marketMult(s,loc,i)));
+  return prices;
+};
+// Every trade moves the district: dumping saturates it, buying it out
+// tightens it, and volume anywhere pulls patrol cars and then informants.
+const tradeMarketPatch=(s,drugIdx,amt,kind)=>{
+  const loc=s.loc;
+  const locDemand=(s.locDemand||initLocDemand()).map(r=>[...r]);
+  const patrols=[...(s.patrols||initPatrols())];
+  const informants=[...(s.informants||initInformants())];
+  const districtSales=[...(s.districtSales||LOCS.map(()=>0))];
+  const cur=locDemand[loc][drugIdx];
+  if(kind==="sell"){
+    locDemand[loc][drugIdx]=CL(cur*(1-Math.min(0.5,amt*MKT.sellHit)),MKT.demFloor,MKT.demCeil);
+    districtSales[loc]=(districtSales[loc]||0)+amt;
+  } else {
+    locDemand[loc][drugIdx]=CL(cur*(1+Math.min(0.35,amt*MKT.buyDrain)),MKT.demFloor,MKT.demCeil);
+  }
+  const w=amt>=20?1:amt>=10?0.6:amt>=5?0.3:0.1;
+  patrols[loc]=CL(patrols[loc]+w*MKT.patrolPerTrade,0,MKT.patrolMax);
+  if(patrols[loc]>=2.6&&amt>=6)
+    informants[loc]=CL(informants[loc]+MKT.infGain*(kind==="sell"?1:0.6),0,MKT.infMax);
+  return { locDemand, patrols, informants, districtSales };
+};
+
+// ── RISK YOU CAN READ AND PLAN AROUND ──
+const districtRisk=(s,loc)=>{
+  const p=(s.patrols||[])[loc]||0, inf=(s.informants||[])[loc]||0;
+  const den=((s.safeHouses||[])[loc]>=0)?0.88:1;
+  const crew=Math.min(0.15,((s.enforcers||[])[loc]||0)*0.05);
+  return CL((1+p*0.11+inf*0.16)*den*(1-crew),0.55,2.40);
+};
+// Exactly mirrors the heat math in processTravel, so the number the player
+// is shown is the number they will get.
+const heatAt=(s,loc)=>{
+  const used=(s.inv||[]).reduce((a,b)=>a+b,0);
+  const hc=used>50?3:used>20?2:used>0?0:-1;
+  const passive=used===0?3:0;
+  const sh=(s.safeHouses||[])[loc];
+  let decay=(sh>=0?SAFE_HOUSES[sh].heatDecay:0)+((s.lifestyle||[]).includes("rolex")?2:0);
+  if(s.dailyHeatDecayMod) decay*=s.dailyHeatDecayMod;
+  const floor=Math.floor((s.totalProfit||0)/50000)+Math.floor((s.totalBusts||0)*3);
+  return { next:Math.round(CL(Math.max(s.fedHeat+hc-decay-passive,floor),0,100)), floor };
+};
+
+// ── EMPIRE ECONOMICS — income you can strangle, upkeep that escalates ──
+const empireIncome=s=>(s.turf||[]).reduce((sum,lv,i)=>{
+  if(!lv) return sum;
+  const row=(s.locDemand||[])[i];
+  const sat=row?CL(row.reduce((a,b)=>a+b,0)/DRUG_COUNT,0.55,1.12):1;
+  const pat=CL(1-((s.patrols||[])[i]||0)*0.06,0.66,1);
+  const loy=CL((((s.enfLoyalty||[])[i])??100)/100,0.5,1.1);
+  const held=((s.enforcers||[])[i]||0)>0?1:0.78;
+  const col=((s.colTurf||[])[i]&&!(s.storyFlags||{}).col_peace)?0.8:1;
+  return sum+Math.round(TURF_LEVELS[lv].income*CL(sat*pat*loy*held*col,0.35,1.12));
+},0);
+const crewUpkeep=s=>(s.enforcers||[]).reduce(
+  (sum,e)=>sum+e*Math.round(ENFORCER_UPKEEP*(1+(s.currentEra||0)*0.15)),0);
+const strengthOf=s=>Math.round((s.enforcers||[]).reduce((a,b)=>a+b,0)*2
+  +(s.gun?4:0)+((s.cred||0)/12)+(s.turf||[]).filter(t=>t>0).length*2);
+
+// ── LAUNDERING — clean money is safe and useless; dirty money is neither ──
+const LAUNDER_CHANNELS=[
+  { id:"cambio", name:"Casa de Cambio", icon:"💱", fee:0.20, cap:8000, risk:0,
+    desc:"A window on Flagler that turns anything into anything. The rate is robbery. Nobody asks.",
+    need:()=>true },
+  { id:"club", name:"Door Receipts", icon:"🪩", fee:0.09, cap:14000, risk:0.07,
+    desc:"The club reports a very good night. Every night. Auditors love a pattern.",
+    need:s=>(s.lifestyle||[]).includes("club") },
+  { id:"marina", name:"Charter Fleet", icon:"🚤", fee:0.13, cap:22000, risk:0.11,
+    desc:"Charters out of Dinner Key that never leave the dock. Customs boards boats on slow afternoons.",
+    need:s=>(s.lifestyle||[]).includes("boat")||!!s.importBonus },
+  { id:"cass", name:"Cass's Network", icon:"🏦", fee:0.11, cap:45000, risk:0.05,
+    desc:"Shells, a marina, two funeral homes. Paper trails have authors, and authors have memories.",
+    need:s=>!!(s.storyFlags||{}).cass_network&&!(s.storyFlags||{}).cass_burned },
+];
+const launderUsed=(s,id)=>(s.launderMove===s.move)?(((s.launderUse||{})[id])||0):0;
+const launderCap=(s,ch)=>Math.max(0,ch.cap-launderUsed(s,ch.id));
+
+function processLaunder(s,channelId,amount){
+  const ch=LAUNDER_CHANNELS.find(c=>c.id===channelId);
+  if(!ch||!ch.need(s)) return { state:s, ok:false };
+  const amt=Math.min(Math.floor(amount||0),s.cash,launderCap(s,ch));
+  if(amt<500) return { state:s, ok:false };
+  const fee=Math.floor(amt*ch.fee), clean=amt-fee;
+  const use={...((s.launderMove===s.move)?(s.launderUse||{}):{})};
+  use[ch.id]=(use[ch.id]||0)+amt;
+  const effects=[{type:"SFX",name:"coin"},{type:"SPAWN",text:`✨ ${FM(clean)} CLEAN`,color:C.gold,y:.46}];
+  let npcState=s.npcState, wire=s.newsWire;
+  if(ch.risk&&Math.random()<ch.risk){
+    npcState={...s.npcState, ramirez:{...s.npcState.ramirez,
+      evidence:CL((s.npcState.ramirez.evidence||0)+1,0,20)}};
+    wire=pushWire(wire,{icon:"🕵️",tone:"bad",move:s.move,
+      text:`The wash through ${ch.name} left a trail. Somebody photocopied it.`});
+    effects.push({type:"SPAWN",text:"🕵️ THE WASH LEFT A TRAIL (+1 EVIDENCE)",color:C.pink,y:.36},{type:"SHAKE"});
+  }
+  return { state:{...s, cash:s.cash-amt, cleanCash:(s.cleanCash||0)+clean, npcState, newsWire:wire,
+    launderMove:s.move, launderUse:use, launderedTotal:(s.launderedTotal||0)+amt}, ok:true, effects };
+}
+
+// ── STREET OPERATIONS — informants and crew are problems you can pay,
+//    threaten, or ignore, and each of those costs something different ──
+function processPayInformant(s,loc){
+  const inf=((s.informants||[])[loc])||0;
+  if(inf<1||s.loc!==loc) return { state:s, ok:false };
+  const cost=Math.floor(700+inf*1500+(s.totalProfit||0)*0.005);
+  if(s.cash<cost) return { state:s, ok:false };
+  const informants=[...s.informants]; informants[loc]=Math.max(0,inf-2.5);
+  return { state:{...s, cash:s.cash-cost, informants,
+    newsWire:pushWire(s.newsWire,{icon:"🤐",tone:"good",move:s.move,
+      text:`Somebody in ${LOCS[loc].name} decided they never saw you. ${FM(cost)}, well spent.`})},
+    ok:true, effects:[{type:"SFX",name:"coin"},{type:"SPAWN",text:`🤐 −${FM(cost)} SILENCE`,color:C.blue,y:.46}] };
+}
+function processLeanOnInformant(s,loc){
+  const inf=((s.informants||[])[loc])||0;
+  if(inf<1||s.loc!==loc) return { state:s, ok:false };
+  const power=((s.enforcers||[])[loc]||0)*2+(s.gun?2:0)+Math.floor(s.cred/25);
+  if(Math.random()<CL(0.22+power*0.09,0.22,0.88)){
+    const informants=[...s.informants]; informants[loc]=0;
+    return { state:{...s, informants, cred:CL(s.cred+2,0,100), fedHeat:CL(s.fedHeat+3,0,100),
+      newsWire:pushWire(s.newsWire,{icon:"👊",tone:"good",move:s.move,
+        text:`A short conversation in ${LOCS[loc].name}. The snitch has relatives in Georgia now.`})},
+      ok:true, effects:[{type:"SFX",name:"sellBig"},{type:"SHAKE"},
+        {type:"SPAWN",text:"👊 THE STREET GOT QUIET",color:C.orange,y:.46}] };
+  }
+  const npcState={...s.npcState, ramirez:{...s.npcState.ramirez,
+    evidence:CL((s.npcState.ramirez.evidence||0)+2,0,20)}};
+  const hp=CL(s.hp-R(6,14),0,100);
+  const effects=[{type:"SFX",name:"police"},{type:"SHAKE"},{type:"FLASH",color:C.pink+"55"},
+    {type:"PING",stat:"hp"},{type:"SPAWN",text:"🚨 WITNESSED (+2 EVIDENCE)",color:C.pink,y:.46}];
+  if(hp<=0) effects.push({type:"GAME_OVER",ending:"dead"});
+  return { state:{...s, npcState, hp, fedHeat:CL(s.fedHeat+8,0,100),
+    hudSeen:{...s.hudSeen,hp:true},
+    newsWire:pushWire(s.newsWire,{icon:"🚨",tone:"bad",move:s.move,
+      text:`It went badly in ${LOCS[loc].name}. There is a report with your description on it.`})},
+    ok:true, effects };
+}
+function processCrewBonus(s,loc){
+  const n=((s.enforcers||[])[loc])||0;
+  if(n<=0) return { state:s, ok:false };
+  const cost=n*900;
+  if(s.cash<cost) return { state:s, ok:false };
+  const enfLoyalty=[...(s.enfLoyalty||LOCS.map(()=>100))];
+  if(enfLoyalty[loc]>=98) return { state:s, ok:false };
+  enfLoyalty[loc]=CL(enfLoyalty[loc]+34,0,100);
+  return { state:{...s, cash:s.cash-cost, enfLoyalty, cred:CL(s.cred+1,0,100)}, ok:true,
+    effects:[{type:"SFX",name:"coin"},{type:"SPAWN",text:"👊 CREW PAID — LOYALTY UP",color:C.gold,y:.46}] };
+}
+
+// ── THE RIVAL KINGPIN ──
+// El Colombiano runs a parallel empire: he grows, floods your districts,
+// buys cops, raids your turf and escalates through three confrontations.
+function processSabotage(s){
+  const cost=6000, r=s.rival||initRival();
+  if(s.cash<cost||s.cred<25||r.broken) return { state:s, ok:false };
+  const rival={...r};
+  const npcState={...s.npcState, colombiano:{...s.npcState.colombiano, met:true}};
+  const odds=CL(0.35+s.cred/220+(s.enforcers||[]).reduce((a,b)=>a+b,0)*0.03,0.35,0.85);
+  if(Math.random()<odds){
+    rival.power=Math.max(3,Math.round((rival.power-3)*10)/10);
+    rival.cash=Math.max(0,rival.cash-8000);
+    return { state:{...s, cash:s.cash-cost, rival, npcState,
+      newsWire:pushWire(s.newsWire,{icon:"🔥",tone:"good",move:s.move,
+        text:"A Colombian stash house in Hialeah burned down. No insurance was carried."})},
+      ok:true, effects:[{type:"SFX",name:"sellBig"},{type:"SHAKE"},
+        {type:"SPAWN",text:"🔥 −3 RIVAL POWER",color:C.gold,y:.46}] };
+  }
+  npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-2,-10,10);
+  return { state:{...s, cash:s.cash-cost, rival, npcState, fedHeat:CL(s.fedHeat+6,0,100),
+    storyFlags:{...s.storyFlags,col_war:true},
+    newsWire:pushWire(s.newsWire,{icon:"🚨",tone:"bad",move:s.move,
+      text:"Your people got caught doing it. He knows who sent them."})},
+    ok:true, effects:[{type:"SFX",name:"police"},{type:"SHAKE"},
+      {type:"SPAWN",text:"🚨 IT WENT WRONG",color:C.pink,y:.46}] };
+}
+
+const buildRivalEvent=(level,st,rival)=>{
+  if(level>=3){
+    const mine=strengthOf(st), cost=Math.floor((st.cash+st.bank)*0.25);
+    return { kind:"rival", level:3, header:"THE RIVAL — ENDGAME", icon:"🛥", color:C.gold,
+      title:"THE LAST BOAT",
+      text:"He is loading a boat at a private dock in the Keys, which means he is either leaving or clearing space for something. His man calls your motel at midnight. \"He says you can come to the dock tonight. He says bring whatever you think you need.\"",
+      opts:[
+        { id:"assault", label:`🔫 TAKE THE DOCK — YOU ${mine} vs HIM ${Math.round(rival.power)}`, color:C.pink, cost:0,
+          note:`You need roughly ${Math.ceil(rival.power*0.8)} strength on the night — how hard you fight swings it by half, and luck does the rest. Win and his organization is yours. Lose and you crawl home short a district.` },
+        { id:"tribute_final", label:`💵 BUY PERMANENT PEACE — ${FM(cost)}`, color:C.gold, cost,
+          note:"He never touches you again. Your escape fund never recovers either." },
+        { id:"informant", label:"📞 HAND HIM TO RAMIREZ", color:C.blue, cost:0,
+          note:"He disappears tonight. So does 12 cred — and Ramirez now knows exactly who you are (+5 evidence)." },
+      ] };
+  }
+  if(level===2) return { kind:"rival", level:2, header:"THE RIVAL — THE SIT-DOWN", icon:"🗺", color:C.orange,
+    title:"THE SIT-DOWN",
+    text:"Two cars, one warehouse in Hialeah, nobody armed — officially. He has the map again and this time your name is written on part of it. \"We are past the part where one of us leaves,\" he says. \"Now we only choose HOW.\"",
+    opts:[
+      { id:"split", label:"🕊 SPLIT THE CITY", color:C.green, cost:0,
+        note:"Peace: his crews stop undercutting you and the raids stop. He keeps growing anyway." },
+      { id:"setup", label:"🕵️ GIVE RAMIREZ HIS ROUTE", color:C.blue, cost:0,
+        note:"Guts his organization. Ramirez gets your number with it (+2 evidence, and the file starts moving)." },
+      { id:"war", label:"⚔ NO DEAL — WAR", color:C.pink, cost:0,
+        note:"+6 cred. He commits everything to taking your blocks." },
+    ] };
+  const tcost=Math.floor((st.cash||0)*0.12);
+  return { kind:"rival", level:1, header:"THE RIVAL — THE OFFER", icon:"🥃", color:C.orange,
+    title:"THE OFFER",
+    text:"A waiter you did not order from sets down a rum you did not ask for. El Colombiano is two tables away, not looking at you. His man leaves a napkin with a number on it: what he thinks your week is worth. \"He is not asking for your city,\" the man says. \"Only rent.\"",
+    opts:[
+      { id:"tribute", label:`💵 PAY THE RENT — ${FM(tcost)}`, color:C.gold, cost:0,
+        note:"He stands down for eight moves. Your money buys his next block." },
+      { id:"buyoff", label:"🤝 BUY HIS LIEUTENANT — $12,000", color:C.blue, cost:12000,
+        note:"Might split his organization. Might fund the man who reports you." },
+      { id:"refuse", label:"🖕 SEND THE NAPKIN BACK", color:C.pink, cost:0,
+        note:"+4 cred. His crews start working your corners tomorrow." },
+    ] };
+};
+
+function resolveWorldEvent(s,ev,opt,skill=0.5){
+  const id=(opt&&opt.id)?opt.id:opt;
+  const rival={...(s.rival||initRival())};
+  const npcState={...s.npcState, colombiano:{...s.npcState.colombiano}, ramirez:{...s.npcState.ramirez}};
+  const storyFlags={...s.storyFlags};
+  const montage=[...(s.montage||[])];
+  const effects=[{type:"SFX",name:"click"}];
+  let cash=s.cash, bank=s.bank, hp=s.hp, cred=s.cred, evtMsg=null;
+  let colTurf=[...(s.colTurf||LOCS.map(()=>false))];
+  const turf=[...(s.turf||LOCS.map(()=>0))];
+  let wire=s.newsWire;
+  npcState.colombiano.met=true;
+
+  if(id==="tribute"){
+    const cost=Math.min(cash,Math.floor(cash*0.12));
+    cash-=cost; rival.cash+=cost; rival.power+=1.5; rival.truce=8;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)+1,-10,10);
+    cred=CL(cred-2,0,100);
+    evtMsg=`🇨🇴 You paid the rent — ${FM(cost)}. His crews will look through you for a while. Everybody else saw you pay.`;
+    montage.push({move:s.move,text:`Paid El Colombiano ${FM(cost)} in tribute.`});
+    effects.push({type:"SFX",name:"coin"},{type:"SPAWN",text:`−${FM(cost)} TRIBUTE`,color:C.pink,y:.46});
+    wire=pushWire(wire,{icon:"🇨🇴",tone:"info",move:s.move,text:"Word is you pay rent to the Colombians now."});
+  } else if(id==="buyoff"){
+    if(cash<12000) return { state:s, ok:false };
+    cash-=12000;
+    if(Math.random()<0.6){
+      rival.power=Math.max(4,rival.power-6); rival.cash=Math.max(0,rival.cash-9000);
+      evtMsg="🤝 His lieutenant took the envelope, and two weeks later took three crews with him. The Colombian is smaller today than he was yesterday.";
+      effects.push({type:"SFX",name:"sellBig"},{type:"SPAWN",text:"🤝 HIS ORGANIZATION SPLIT",color:C.gold,y:.46});
+      wire=pushWire(wire,{icon:"🤝",tone:"good",move:s.move,text:"A Colombian lieutenant left with three crews. Nobody is calling it a defection."});
+    } else {
+      npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-3,-10,10);
+      rival.hitFuse=s.move+2; storyFlags.col_war=true;
+      evtMsg="🤝 The lieutenant carried your money to his boss the same afternoon. You bought a $12,000 introduction to a grudge.";
+      effects.push({type:"SFX",name:"police"},{type:"SHAKE"},{type:"FLASH",color:C.pink+"44"});
+      wire=pushWire(wire,{icon:"🚗",tone:"bad",move:s.move,text:"You are being watched. He knows what you tried to buy."});
+    }
+  } else if(id==="refuse"){
+    cred=CL(cred+4,0,100); storyFlags.col_war=true;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-2,-10,10);
+    evtMsg="🖕 You sent the napkin back with the number crossed out. The waiter looked ill. El Colombiano laughed once and never looked at you again.";
+    effects.push({type:"SPAWN",text:"⭐ +4 CRED",color:C.gold,y:.46});
+  } else if(id==="split"){
+    storyFlags.col_peace=true; storyFlags.col_war=false;
+    rival.truce=14; rival.flood=null; rival.hitFuse=0;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)+2,-10,10);
+    evtMsg="🕊 Somebody drew a line through the map. His crews stop undercutting you tonight — and he keeps everything on his side of it, growing.";
+    montage.push({move:s.move,text:"Split Miami with El Colombiano at a sit-down."});
+    effects.push({type:"SFX",name:"coin"});
+  } else if(id==="setup"){
+    npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+2,0,20);
+    npcState.ramirez.met=true;
+    rival.power=Math.max(4,rival.power-9); rival.heat+=25; rival.cash=Math.max(0,rival.cash-15000);
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-3,-10,10);
+    storyFlags.col_war=true;
+    evtMsg="🕵️ Customs opened a container in Port Everglades that was never supposed to be opened. He lost a season. You lost deniability.";
+    effects.push({type:"SFX",name:"police"},{type:"SPAWN",text:"🕵️ −9 RIVAL POWER, +2 EVIDENCE",color:C.blue,y:.46});
+    wire=pushWire(wire,{icon:"🕵️",tone:"info",move:s.move,text:"A seizure at Port Everglades. Somebody talked. Two somebodies, actually."});
+  } else if(id==="war"){
+    cred=CL(cred+6,0,100); storyFlags.col_war=true; rival.power+=2;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-2,-10,10);
+    evtMsg="⚔ Nobody shook hands. Both cars left fast. By morning there were new crews on two of your corners.";
+    effects.push({type:"SFX",name:"police"},{type:"SPAWN",text:"⚔ WAR — +6 CRED",color:C.pink,y:.46});
+  } else if(id==="assault"){
+    const mine=Math.round(strengthOf(s)*(0.45+skill*1.10))+R(0,4);
+    if(mine>=rival.power*0.8){
+      const take=Math.floor(rival.cash*0.5);
+      cash+=take; cred=CL(cred+15,0,100);
+      colTurf=colTurf.map(()=>false);
+      rival.broken=true; rival.power=0; rival.cash=0; rival.flood=null; rival.hitFuse=0; rival.truce=999;
+      storyFlags.col_broken=true; storyFlags.col_war=false;
+      evtMsg=`👑 The dock burned for an hour. His people left in boats that were not his. ${FM(take)} came out of a safe that was. Miami is short one kingpin.`;
+      montage.push({move:s.move,text:"Took the dock. Broke El Colombiano."});
+      effects.push({type:"SFX",name:"sellMassive"},{type:"SHAKE"},{type:"FLASH",color:C.gold+"55"},
+        {type:"CASHFLY",count:14},{type:"SPAWN",text:"👑 HIS EMPIRE IS YOURS",color:C.gold,y:.42});
+      wire=pushWire(wire,{icon:"👑",tone:"good",move:s.move,text:"El Colombiano is finished. The corners are asking who to pay now."});
+    } else {
+      const loss=R(18,30); hp=CL(hp-loss,0,100);
+      const li=turf.map((t,i)=>t>0?i:-1).filter(i=>i>=0);
+      if(li.length){ const d=li[R(0,li.length-1)]; turf[d]=Math.max(0,turf[d]-1); }
+      npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-3,-10,10);
+      storyFlags.col_war=true; rival.power+=3; rival.truce=0;
+      evtMsg=`🔫 They were ready. Of course they were ready. −${loss} HP and a block you used to own.`;
+      effects.push({type:"SFX",name:"police"},{type:"SHAKE"},{type:"FLASH",color:C.pink+"66"},{type:"PING",stat:"hp"});
+      wire=pushWire(wire,{icon:"🔫",tone:"bad",move:s.move,text:"The dock was a trap. Everybody knew it but you."});
+    }
+  } else if(id==="tribute_final"){
+    let cost=Math.floor((cash+bank)*0.25);
+    const fromCash=Math.min(cash,cost); cash-=fromCash; cost-=fromCash;
+    bank=Math.max(0,bank-cost);
+    rival.truce=999; rival.power+=2; rival.flood=null; rival.hitFuse=0;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)+2,-10,10);
+    storyFlags.col_peace=true; storyFlags.col_war=false;
+    evtMsg="🕊 A quarter of everything bought a peace with no expiry date. He toasts you at the dock. You do not drink it.";
+    montage.push({move:s.move,text:"Bought a permanent peace from El Colombiano."});
+    effects.push({type:"SFX",name:"coin"},{type:"SPAWN",text:"🕊 PERMANENT PEACE",color:C.green,y:.46});
+  } else if(id==="informant"){
+    npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+5,0,20);
+    npcState.ramirez.met=true;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-4,-10,10);
+    cred=CL(cred-12,0,100);
+    rival.broken=true; rival.power=0; rival.flood=null; rival.hitFuse=0; rival.truce=999;
+    colTurf=colTurf.map(()=>false);
+    storyFlags.col_broken=true; storyFlags.became_informant=true;
+    evtMsg="📞 Federal agents took the dock at 4 AM. Ramirez did not thank you. He wrote your name down twice.";
+    montage.push({move:s.move,text:"Handed El Colombiano to Vice."});
+    effects.push({type:"SFX",name:"police"},{type:"FLASH",color:C.blue+"55"},
+      {type:"SPAWN",text:"📞 HE IS GONE — SO IS YOUR NAME",color:C.blue,y:.44});
+    wire=pushWire(wire,{icon:"📞",tone:"info",move:s.move,text:"A federal raid took the Keys dock. Somebody made a phone call."});
+  } else return { state:s, ok:false };
+
+  if(hp<=0) effects.push({type:"GAME_OVER",ending:"dead"});
+  return { state:{...s, cash:Math.max(0,cash), bank, hp, cred, turf, colTurf, rival, npcState, storyFlags,
+    montage, newsWire:wire, evtMsg:evtMsg||s.evtMsg,
+    hudSeen:{...s.hudSeen,hp:s.hudSeen.hp||hp<s.hp}}, ok:true, effects };
+}
+
+// ── THE WORLD TICK — one call per travel, after the state is assembled.
+//    Returns a patch (never mutates), effects, and any modal it wants raised.
+function worldTick(s,out,ctx){
+  const nm=out.move, destLoc=out.loc, era=getEra(out);
+  const effects=[], patch={};
+  let evtMsg=null, turfWar=null, worldEvent=null;
+  let wire=[...(s.newsWire||[])];
+  let cash=out.cash, bank=out.bank, hp=out.hp, cred=out.cred;
+  const npcState={...out.npcState, ramirez:{...out.npcState.ramirez}, colombiano:{...out.npcState.colombiano}};
+  const storyFlags={...out.storyFlags};
+  const colTurf=[...(out.colTurf||LOCS.map(()=>false))];
+  const enforcers=[...(out.enforcers||LOCS.map(()=>0))];
+  const turf=[...(out.turf||LOCS.map(()=>0))];
+
+  // 1 ── the districts breathe back toward normal
+  const locDemand=(s.locDemand||initLocDemand()).map(row=>row.map(v=>
+    Math.round(CL(v+(1-v)*MKT.recover,MKT.demFloor,MKT.demCeil)*1000)/1000));
+  const districtSales=(s.districtSales||LOCS.map(()=>0)).map(v=>Math.round(v*8.5)/10);
+
+  // 2 ── patrols chase your noise, informants forget slowly
+  const patrols=(s.patrols||initPatrols()).map((p,i)=>{
+    const base=Math.round(LOCS[i].heat*100)/10;
+    let v=p-MKT.patrolDecay*(i===destLoc?0.5:1);
+    if(i===destLoc&&out.fedHeat>=35) v+=out.fedHeat>=60?0.5:0.25;
+    v+=turf[i]*0.18;
+    return Math.round(CL(Math.max(base,v),0,MKT.patrolMax)*100)/100;
+  });
+  const informants=(s.informants||initInformants()).map((v,i)=>
+    Math.round(CL(i===destLoc?v:v-MKT.infDecay,0,MKT.infMax)*100)/100);
+  const infHere=informants[destLoc]||0;
+  if(infHere>=2.4&&(npcState.ramirez.evidence||0)<12&&Math.random()<0.10+infHere*0.04){
+    npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+1,0,20);
+    evtMsg="🐀 Somebody around here has your plate number written down. The file grew a page.";
+    wire=pushWire(wire,{icon:"🐀",tone:"bad",move:nm,text:`An informant in ${LOCS[destLoc].name} called Vice. +1 evidence.`});
+  }
+
+  // 3 ── supply shocks: telegraphed, then live, then over
+  const shocks=[];
+  for(const sk of (s.shocks||[])){
+    if(sk.pending){
+      shocks.push({...sk,pending:false});
+      wire=pushWire(wire,{icon:sk.icon,tone:sk.kind==="spike"?"good":"bad",move:nm,text:sk.landed});
+      continue;
+    }
+    const left=(sk.moves||1)-1;
+    if(left>0) shocks.push({...sk,moves:left});
+    else wire=pushWire(wire,{icon:"⌛",tone:"info",move:nm,
+      text:`${DRUGS[sk.drug].name} ${sk.loc>=0?"in "+LOCS[sk.loc].name:"citywide"} is back to normal.`});
+  }
+  if(shocks.length<MKT.shockCap&&Math.random()<MKT.shockChance){
+    const sk=rollShock();
+    shocks.push(sk);
+    wire=pushWire(wire,{icon:"📻",tone:"info",move:nm,text:sk.warn});
+    effects.push({type:"SFX",name:"pager"});
+  }
+
+  // 4 ── street rivals spoil the buyers wherever they are standing
+  const focus=[...(s.rivalFocus||[])];
+  (out.rivals||[]).forEach((rv,i)=>{
+    if(focus[i]==null||Math.random()<0.25) focus[i]=R(0,DRUG_COUNT-1);
+    const L=rv.loc, D=focus[i];
+    if(L>=0&&L<LOC_COUNT) locDemand[L][D]=CL(locDemand[L][D]*0.95,MKT.demFloor,MKT.demCeil);
+    if(L===destLoc&&Math.random()<0.16)
+      wire=pushWire(wire,{icon:"⚔",tone:"bad",move:nm,
+        text:`${rv.name} is moving ${DRUGS[D].name} in ${LOCS[L].name}. Buyers here have options.`});
+  });
+
+  // 5 ── the rival kingpin wakes up once you are worth his attention
+  const rival={...(s.rival||initRival())};
+  if(storyFlags.col_broken) rival.broken=true;
+  const grudge=Math.max(0,-(npcState.colombiano.trust||0))+(storyFlags.col_war?2:0);
+
+  // 6 ── the crew: paid on time they hold, unpaid they take other offers
+  const enfLoyalty=[...(s.enfLoyalty||LOCS.map(()=>100))];
+  if(enforcers.some(e=>e>0)){
+    if(cash<0){
+      cash=0;
+      for(let i=0;i<enfLoyalty.length;i++) if(enforcers[i]>0) enfLoyalty[i]=CL(enfLoyalty[i]-20,0,100);
+      evtMsg=evtMsg||"👊 Payday came and went. Your crew noticed. They always notice.";
+      wire=pushWire(wire,{icon:"👊",tone:"bad",move:nm,text:"The crew went unpaid. Loyalty is bleeding out."});
+      effects.push({type:"SHAKE"},{type:"SPAWN",text:"👊 CREW UNPAID",color:C.pink,y:.5});
+    } else {
+      const gain=(cred>=40?2.5:1.5)-(era.copsMod>=1.6?1:0);
+      for(let i=0;i<enfLoyalty.length;i++) enfLoyalty[i]=CL(enfLoyalty[i]+(enforcers[i]>0?gain:3),0,100);
+    }
+    for(let i=0;i<enforcers.length;i++){
+      if(enforcers[i]>0&&enfLoyalty[i]<=28&&Math.random()<0.28){
+        enforcers[i]-=1; enfLoyalty[i]=CL(enfLoyalty[i]+34,0,100);
+        const flip=!rival.broken&&Math.random()<0.5;
+        if(flip) rival.power+=1.5;
+        evtMsg=evtMsg||(flip
+          ?`👊 One of your people in ${LOCS[i].name} is working a Colombian corner now. He did not say goodbye.`
+          :`👊 One of your people in ${LOCS[i].name} did not show up. His apartment is empty.`);
+        wire=pushWire(wire,{icon:"👊",tone:"bad",move:nm,
+          text:flip?`A soldier defected to El Colombiano in ${LOCS[i].name}.`:`A soldier walked off in ${LOCS[i].name}.`});
+        effects.push({type:"SHAKE"});
+      }
+    }
+  }
+
+  // 7 ── his moves
+  const awake=!rival.broken&&((out.currentEra||0)>=1||(out.totalProfit||0)>=20000);
+  if(awake){
+    rival.power=Math.min(60,Math.round((rival.power+0.28+(out.currentEra||0)*0.10
+      +colTurf.filter(Boolean).length*0.18)*10)/10);
+    rival.cash+=1000+colTurf.filter(Boolean).length*800;
+    if(rival.truce>0&&rival.truce<900) rival.truce--;
+    if(rival.flood&&nm>=rival.flood.until) rival.flood=null;
+    npcState.colombiano.met=true;
+    storyFlags.col_rival_active=true;
+
+    if(rival.truce<=0&&nm%2===0){
+      const mine=turf.map((t,i)=>t>0?i:-1).filter(i=>i>=0);
+      const open=LOCS.map((l,i)=>i).filter(i=>!turf[i]&&!colTurf[i]&&i!==destLoc);
+      const roll=Math.random(), warMode=grudge>=3&&!storyFlags.col_peace;
+      if(warMode&&mine.length&&roll<0.22&&nm-(rival.lastRaid||0)>=4){
+        const target=mine[R(0,mine.length-1)];
+        turfWar={ loc:target, rivalName:"El Colombiano", rivalPower:CL(Math.round(rival.power*0.5)+R(0,2),3,15) };
+        rival.raids=(rival.raids||0)+1; rival.lastRaid=nm;
+        rival.lastAction="raid"; rival.lastText=`Moving on your block in ${LOCS[target].name}.`;
+      } else if(roll<0.50){
+        const L=(mine.length&&Math.random()<0.6)?mine[R(0,mine.length-1)]:R(0,LOC_COUNT-1);
+        const D=R(0,DRUG_COUNT-1);
+        rival.flood={loc:L,drug:D,until:nm+3};
+        locDemand[L][D]=CL(locDemand[L][D]*0.88,MKT.demFloor,MKT.demCeil);
+        rival.lastAction="flood"; rival.lastText=`Dumping ${DRUGS[D].name} in ${LOCS[L].name}.`;
+        wire=pushWire(wire,{icon:"🇨🇴",tone:"bad",move:nm,
+          text:`He is flooding ${LOCS[L].name} with ${DRUGS[D].name}. Sells there are ruined for a few days.`});
+      } else if(roll<0.68&&open.length&&!storyFlags.col_peace){
+        const claim=open[R(0,open.length-1)];
+        colTurf[claim]=true; rival.power+=0.6;
+        rival.lastAction="expand"; rival.lastText=`Took ${LOCS[claim].name}.`;
+        wire=pushWire(wire,{icon:"🇨🇴",tone:"bad",move:nm,
+          text:`New paint on the corners in ${LOCS[claim].name}. His crews work it now.`});
+      } else if(roll<0.76&&(npcState.ramirez.evidence||0)<10){
+        npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+1,0,20);
+        rival.heat=Math.max(0,rival.heat-2);
+        rival.lastAction="tip"; rival.lastText="Fed Vice a name. Yours.";
+        wire=pushWire(wire,{icon:"📞",tone:"bad",move:nm,
+          text:"An anonymous call to Vice today. Anonymous, accurate, and Colombian."});
+      } else {
+        rival.power+=0.7; rival.cash+=4500;
+        rival.lastAction="build"; rival.lastText="Quiet week. Counting money.";
+      }
+    }
+
+    // the contract, telegraphed two moves out
+    if(grudge>=5&&!rival.hitFuse&&rival.truce<=0&&Math.random()<0.20){
+      rival.hitFuse=nm+2;
+      evtMsg=evtMsg||"🚗 A cream-colored Chevy has been parked across from your place since Tuesday. Nobody gets out of it.";
+      wire=pushWire(wire,{icon:"🚗",tone:"bad",move:nm,text:"You are being watched. Two moves, maybe less."});
+      effects.push({type:"SFX",name:"police"});
+    }
+    if(rival.hitFuse&&nm>=rival.hitFuse){
+      rival.hitFuse=0;
+      const guard=(out.gun?3:0)+(enforcers[destLoc]||0)*2+(((out.safeHouses||[])[destLoc]>=0)?2:0);
+      if(guard>=5){
+        cred=CL(cred+4,0,100);
+        npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-1,-10,10);
+        evtMsg="🔫 They came for you in a parking lot. Your people were already there. Somebody else went to the hospital tonight.";
+        effects.push({type:"SHAKE"},{type:"SFX",name:"sellBig"},{type:"SPAWN",text:"🔫 THEY MISSED — +4 CRED",color:C.gold,y:.42});
+        wire=pushWire(wire,{icon:"🔫",tone:"good",move:nm,text:"Somebody tried. Somebody failed. The street noticed both."});
+      } else {
+        const loss=R(10,22), take=Math.min(Math.max(0,cash),R(1500,6000));
+        hp=CL(hp-loss,0,100); cash-=take;
+        evtMsg=`🔫 Two men, one car, eleven seconds. −${loss} HP${take>0?", −"+FM(take):""}. You never saw faces.`;
+        effects.push({type:"SHAKE"},{type:"FLASH",color:C.pink+"66"},{type:"SFX",name:"police"},{type:"PING",stat:"hp"});
+        wire=pushWire(wire,{icon:"🔫",tone:"bad",move:nm,text:"Shots on your block. Yours, specifically."});
+      }
+    }
+
+    // escalating confrontations — power 13 / 22 / 34
+    const level=rival.power>=34?3:rival.power>=22?2:rival.power>=13?1:0;
+    const busy=turfWar||(ctx&&(ctx.turfWar||ctx.dealEvent||ctx.randEnc));
+    if(level>(rival.confront||0)&&!busy){
+      rival.confront=level;
+      worldEvent=buildRivalEvent(level,{...out,cash,bank,cred},rival);
+      effects.push({type:"SFX",name:"pager"});
+    }
+  }
+
+  // 8 ── Treasury: dirty money is the only money they can take
+  let forfeitFuse=s.forfeitFuse||0;
+  if(!forfeitFuse&&out.fedHeat>=58&&(cash+bank)>=50000&&Math.random()<0.18){
+    forfeitFuse=nm+3;
+    evtMsg=evtMsg||"🏛 A Treasury agent spent the afternoon with your bank's records. Dirty money is the only kind they can take.";
+    wire=pushWire(wire,{icon:"🏛",tone:"bad",move:nm,
+      text:"Treasury subpoenaed account records. Wash it, spend it, or lose it — three moves."});
+    effects.push({type:"SFX",name:"pager"});
+  } else if(forfeitFuse&&nm>=forfeitFuse){
+    forfeitFuse=0;
+    if(out.fedHeat>=45){
+      const sb=Math.floor(bank*0.25), sc=Math.floor(Math.max(0,cash)*0.10);
+      bank-=sb; cash-=sc;
+      evtMsg=`🏛 ASSET FORFEITURE. ${FM(sb+sc)} seized. The clean money in your pocket is untouched — that was always the point of it.`;
+      effects.push({type:"SHAKE"},{type:"FLASH",color:C.blue+"55"},{type:"SFX",name:"police"},
+        {type:"SPAWN",text:`−${FM(sb+sc)} SEIZED`,color:C.pink,y:.48});
+      wire=pushWire(wire,{icon:"🏛",tone:"bad",move:nm,text:`Forfeiture order executed: ${FM(sb+sc)} gone.`});
+    } else {
+      evtMsg=evtMsg||"🏛 The audit closed. Nothing on paper, nothing to take. Cold money is invisible money.";
+      wire=pushWire(wire,{icon:"🏛",tone:"good",move:nm,text:"Treasury closed the file. You were boring enough."});
+    }
+  }
+
+  patch.locDemand=locDemand; patch.districtSales=districtSales;
+  patch.patrols=patrols; patch.informants=informants;
+  patch.shocks=shocks; patch.newsWire=wire; patch.rivalFocus=focus;
+  patch.rival=rival; patch.enfLoyalty=enfLoyalty; patch.enforcers=enforcers;
+  patch.colTurf=colTurf; patch.turf=turf; patch.npcState=npcState; patch.storyFlags=storyFlags;
+  patch.cash=Math.max(0,cash); patch.bank=Math.max(0,bank); patch.hp=hp; patch.cred=cred;
+  patch.forfeitFuse=forfeitFuse;
+  if(hp<=0) effects.push({type:"GAME_OVER",ending:"dead"});
+  if(hp<out.hp) patch.hudSeen={...out.hudSeen,hp:true};
+  return { patch, effects, evtMsg, turfWar, worldEvent };
+}
+
 // Sky colors for the living header — heat bleeds the sky red
 const skyStops=(move,heat)=>{
   const night=move%2===1, h=CL(heat/100,0,1);
@@ -436,6 +1067,100 @@ const STORY = {
     ] },
 
   // ── TIBURÓN — THE LOAN SHARK ──
+  // ── ARC: THE SUCCESSION — Tiburón, his nephew, and who owns a name (4 beats + epilogues) ──
+  shark_diagnosis: { speaker:"tiburon", portrait:"neutral", priority:10,
+    conditions:{ "npc.tiburon.met":{eq:true}, totalProfitGte:55000, flagNot:"shark_succession", dealsSinceGte:3 },
+    lines:[
+      { text:"Tiburón is not gutting anything. That is the first wrong thing. He is sitting on an overturned crate with a towel pressed to his mouth, and the ice table behind him is still holding yesterday’s fish.", portrait:"neutral" },
+      { text:"“Jackson Memorial,” he says, when he can. “They put a camera down my throat and showed me a photograph of the inside of me. Amigo, it is UGLY in there. Forty years of Marlboros and Presidente and telling people bad news.”", portrait:"neutral" },
+      { text:"He folds the towel so you cannot see the color of it. “My sister’s boy — Néstor. Twenty-six. He wears a beeper on his BELT like a doctor, and he has been counting my book at night when he believes I am asleep.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Your book is safe with me, viejo", reaction:"“VIEJO.” The laugh turns into something else and he waves it away. “You say that word like a man who intends to keep saying it. Okay. Okay. Remember that you said it — my memory is going, amigo, but my BOOK never does.”", effects:{ "npc.tiburon.trust":2, flags:["shark_succession"], montage:"Tiburon coughed into a towel and told you about his nephew." } },
+      { text:"Sounds like Néstor already runs it", reaction:"The old man goes still in a way that has ended arguments across four decades. “He runs the PARTS. There is a difference between running the parts and being the animal.” He spits into the ice. “But yes. He does. You have a nasty eye, amigo. I like it. Not today.”", effects:{ cred:2, "npc.tiburon.trust":-1, flags:["shark_succession","shark_saw_it"], montage:"Told Tiburon his nephew was already running the book." } },
+    ] },
+
+  shark_nestor: { speaker:"tiburon", portrait:"neutral", priority:11,
+    conditions:{ flag:"shark_succession", flagNot:"shark_nestor_done", dealsSinceGte:4 },
+    lines:[
+      { text:"The fish market has new scales — electronic, digital, Japanese. Tiburón stands beside one like it insulted his mother. “Néstor bought these. They are accurate to the GRAM. Tell me: in forty years, has any man ever wanted an accurate number from me?”", portrait:"neutral" },
+      { text:"“He went to the men in Hialeah who lend me what I lend you. He told them I am sick, which is true, and that I am soft, which is a matter of opinion, and that the book should belong to a man with a future.”", portrait:"neutral" },
+      { text:"“So now there is a vote, which is a beautiful word for what it is. And you, amigo — you are ON the book. Big number, good payer, the kind of client men brag about. Your voice is worth something in that room. He will come to you. He drives a red IROC. Subtle, no?”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"What do you want me to say in that room?", reaction:"“Say whatever keeps you breathing. I mean this.” He puts a hand on your shoulder; it weighs less than it used to. “But if you can say it in a way where I still own my own name at the end, I will remember that longer than I remember most things now.”", effects:{ "npc.tiburon.trust":1, flags:["shark_nestor_done"], montage:"Tiburon asked you to speak for him at the vote in Hialeah." } },
+      { text:"I stay out of family business", reaction:"“FAMILY BUSINESS.” He tests the phrase like a bad oyster. “Amigo, you owe money to a family. There is no outside. There is only how far from the table you are sitting when they decide.”", effects:{ flags:["shark_nestor_done","shark_neutral"], montage:"Told Tiburon you stay out of family business. He explained the seating." } },
+    ] },
+
+  shark_the_vote: { speaker:"tiburon", portrait:"neutral", priority:12,
+    conditions:{ flag:"shark_nestor_done", flagNot:"shark_resolved", dealsSinceGte:3 },
+    lines:[
+      { text:"A social club in Hialeah with the windows painted over and a dominoes table nobody is using. Six men who lend money and one man who borrows it — that is you. Tiburón sits at the end with the towel in his apron pocket. Néstor stands, because standing is his entire argument.", portrait:"neutral" },
+      { text:"“The book earns eleven percent,” Néstor says, holding a ledger like a hymnal. “It should earn nineteen. My uncle grants extensions for FUNERALS. Last year he forgave four thousand dollars because a man’s roof came off in a storm.” Nobody at the table disagrees with the arithmetic.", portrait:"neutral" },
+      { text:"Then all of them look at you, because in a room full of lenders the only honest witness is the debt. “Speak,” says the oldest man there, not unkindly. “You are the merchandise. The merchandise gets one word.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Néstor's numbers are better. Back the nephew.", reaction:"You say nineteen percent out loud and the room relaxes, the way rooms do when they hear what they already decided. Néstor wipes your book clean on the spot — a coronation gift, paid with somebody else’s mercy. Tiburón walks out into the parking lot alone and stands there a while, in the sun, in his apron.", effects:{ debtDelta:-1000000, cred:3, "npc.tiburon.trust":-4, flags:["shark_resolved","shark_heir"], montage:"Backed Nestor. The book got wiped. The old man walked out alone." } },
+      { text:"The old man's word is the only collateral here — $12,000 says so", reaction:"You put twelve thousand dollars on the dominoes table and explain what an extension for a funeral is actually worth in a business where every single person eventually needs one. It is the most expensive sentence of your life. The oldest man nods once. Néstor leaves before the vote finishes, and the IROC does not start on the first try.", effects:{ cashDelta:-12000, cred:5, "npc.tiburon.trust":4, flags:["shark_resolved","shark_loyal_final"], montage:"Paid $12,000 to keep Tiburon's name on Tiburon's book." } },
+      { text:"I abstain. It's your family.", reaction:"“The merchandise abstains,” the oldest man says, amused, and writes something down. The vote goes to Néstor by one. On the way out Tiburón does not look at you, which is worse than if he had, and your interest rate goes up on Friday without anybody making a phone call.", effects:{ debtDelta:3000, "npc.tiburon.trust":-2, flags:["shark_resolved","shark_abstained"], montage:"Abstained in Hialeah. Your rate went up on Friday." } },
+    ] },
+
+  shark_epilogue_heir: { speaker:"tiburon", portrait:"neutral", priority:9,
+    conditions:{ flag:"shark_heir", flagNot:"shark_epilogue", dealsSinceGte:4 },
+    lines:[
+      { text:"You find the old man on a shrimp boat at the end of a dock in Islamorada, with a radio playing a game nobody in Florida cares about. The apron is gone. He looks smaller, and somehow also better.", portrait:"neutral" },
+      { text:"“Néstor sends me an envelope every month. It is exactly correct. Nineteen percent of nothing I care about.” He baits a hook badly, on purpose, because there is no hurry anymore. “You voted with the arithmetic, amigo. Arithmetic is a good friend to have and a terrible thing to be.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"You'd have done the same", reaction:"“I would have,” he agrees instantly, which somehow makes it worse. “That is how I know exactly what you are.” He hands you a beer that is too warm. You drink it. The boat rocks. Neither of you says anything for twenty minutes, and it is almost forgiveness.", effects:{ "npc.tiburon.trust":1, flags:["shark_epilogue"], montage:"Warm beer on a shrimp boat in Islamorada. Almost forgiveness." } },
+      { text:"I'm sorry, viejo", reaction:"He waves the hook at you like a conductor. “Don’t be sorry. Sorry is what men say instead of money.” Then, after a while, quieter: “But if you ever need to be somewhere that is not Miami, this boat still runs. That is not sorry. That is the other thing.”", effects:{ "npc.tiburon.trust":2, flags:["shark_epilogue","shark_boat"], montage:"The shrimp boat still runs. Tiburon said so, and he does not lie about boats." } },
+    ] },
+
+  shark_epilogue_loyal: { speaker:"tiburon", portrait:"neutral", priority:9,
+    conditions:{ flag:"shark_loyal_final", flagNot:"shark_epilogue", dealsSinceGte:4 },
+    lines:[
+      { text:"The fish market at 6 AM, and the ice table is full again. Tiburón is gutting a snapper one-handed and losing an argument about the price of stone crab. He looks like a photograph of himself from 1978.", portrait:"neutral" },
+      { text:"“Néstor is in Tampa. He has a car wash. It is a very good car wash — I sent him the money for it, because he is my sister’s boy, and because a man with a car wash does not need a book.” The gold tooth flashes. “Also the doctors lied to me. Six months, they said. That was seven months ago. I intend to make this joke for YEARS.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Then let's keep making money, viejo", reaction:"“AMIGO.” He hits the table hard enough to make the ice jump. “That is the correct thing to say to a dying man who is not dying yet.” Your rate drops two points that morning, and the name of a boat that runs south out of Islamorada gets written on a napkin in fish-scale handwriting.", effects:{ debtDelta:-4000, "npc.tiburon.trust":2, flags:["shark_epilogue","shark_boat"], montage:"Tiburon wrote a boat's name on a napkin. It runs south." } },
+      { text:"Take the money and rest", reaction:"“REST.” He says it the way other men say a slur. But he takes a snapper off the ice, wraps it in newspaper, and pushes it into your hands. “For the pot. Rest is for men who did not enjoy the work. Come Thursday — Thursday I will need a man with a car.”", effects:{ "npc.tiburon.trust":1, flags:["shark_epilogue","shark_boat"], montage:"Told the shark to rest. He handed you a snapper instead." } },
+    ] },
+
+  shark_collectors: { speaker:"tiburon", portrait:"neutral", priority:11,
+    conditions:{ "npc.tiburon.met":{eq:true}, debtGte:22000, flagNot:"shark_collector", dealsSinceGte:2 },
+    lines:[
+      { text:"Two men are waiting in the stairwell, and one of them apologizes before he starts, which is the most frightening part of the entire evening. Tiburón watches from the car with the window down, drinking a mamey shake through a straw.", portrait:"neutral" },
+      { text:"“This is not personal, and I want you to hear that from ME so you do not hear it from a stranger,” he calls up. “Twenty-two thousand dollars is not a debt anymore, amigo. It is an OPINION about me. And opinions travel.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Take the beating. Keep the cash.", reaction:"They are professionals, so it is short and nothing important breaks. Afterward Tiburón passes you the mamey shake through the car window and says, with real warmth, “See? Now nobody has to TALK about you.” The book is unchanged. Your ribs are not.", effects:{ hpDelta:-22, cred:3, "npc.tiburon.trust":1, flags:["shark_collector"], montage:"Took the beating instead of the write-down. Kept the cash." } },
+      { text:"Pay $6,000 right now", reaction:"The envelope ends the evening the way a coin stops a jukebox. “THERE it is,” Tiburón says, delighted, and the two men relax back into being guys — one of them asks if you know a good body shop in Hialeah. “See how quickly we return to friendship?”", effects:{ cashDelta:-6000, debtDelta:-7000, "npc.tiburon.trust":1, flags:["shark_collector"], montage:"Paid $6,000 in a stairwell. The evening ended early." } },
+    ] },
+
+  shark_pistol: { speaker:"tiburon", portrait:"neutral", priority:8,
+    conditions:{ "npc.tiburon.met":{eq:true}, hasGun:false, credGte:18, cashGte:3000, flagNot:"shark_pistol", dealsSinceGte:3 },
+    lines:[
+      { text:"There is a cigar box under the ice table, which is a bad place to keep anything you plan to eat. Inside, wrapped in a dish towel: a .38 with the bluing worn off the grip and somebody else’s initials scratched out of the frame.", portrait:"neutral" },
+      { text:"“Twenty-five hundred. I am not selling you courage, amigo — courage is free and stupid. I am selling you a REASON for men to be polite. In this city that is a utility, like water. You pay for it monthly whether you use it or not.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"I'll take it — $2,500", reaction:"He wraps it back in the towel and hands it over like a fish. “Rule one: never show it. Rule two: if you show it, you are already using it. Rule three, which everybody forgets — a gun in Miami is a magnet for the exact evening you bought it to avoid.”", effects:{ cashDelta:-2500, gun:true, cred:2, flags:["shark_pistol"], montage:"Bought a .38 out of a cigar box under the ice table." } },
+      { text:"I'd rather not carry", reaction:"“Good.” He puts the box away without ceremony. “The ones who say yes too fast are the ones I read about in the Herald. The ones who say no become the ones I do business with for twenty years.” He says this to a man he has known for four months.", effects:{ "npc.tiburon.trust":1, flags:["shark_pistol","refused_gun"], montage:"Turned down the .38. The shark approved, loudly." } },
+    ] },
+
+  shark_keys_water: { speaker:"tiburon", portrait:"neutral", priority:6,
+    conditions:{ "npc.tiburon.met":{eq:true}, locIn:[5], totalProfitGte:40000, flagNot:"keys_run", dealsSinceGte:4 },
+    lines:[
+      { text:"Tiburón is on a dock in Islamorada in a shirt with parrots on it, supervising four men loading ice onto a boat that is considerably faster than a boat carrying ice needs to be.", portrait:"neutral" },
+      { text:"“Understand the geography, amigo. Between Key Largo and Marathon there are eleven hundred islands and about forty police officers, and all forty of them know each other’s boats by sight. This is not lawlessness. It is a very stable arrangement that everybody respects and nobody writes down.”", portrait:"neutral" },
+      { text:"“The mistake tourists make is the mistake the DEA makes: they look for the smuggler. In the Keys there is no smuggler. There is a fishing guide who is also somebody’s cousin, and there is Thursday.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Teach me the water", reaction:"He teaches you three channels, two names to drop, and one hand signal that means turn around and do not ask. “Now you know as much as a bad guide and less than a good one. Do not be confident. Confidence is how the reef gets fed.”", effects:{ cred:3, "npc.tiburon.trust":1, flags:["keys_run","knows_the_water"], montage:"Learned three channels and one hand signal in Islamorada." } },
+      { text:"I'll stick to the highway", reaction:"“US 1. One road, one lane in each direction, a hundred and thirteen miles of nowhere to turn around.” He shrugs, enormously. “It is a road designed by God for roadblocks. But you are a grown man and I am only a fishmonger.”", effects:{ flags:["keys_run"], montage:"Stuck to US 1. A road designed by God for roadblocks." } },
+    ] },
+
   tiburon_intro: { speaker:"tiburon", portrait:"neutral", priority:11,
     conditions:{ debtGte:6000, totalDealsGte:2, flagNot:"shark_intro" },
     lines:[
@@ -459,6 +1184,88 @@ const STORY = {
     ] },
 
   // ── MARIA ──
+  // ── ARC: CÉSAR — the brother you bought out of Panama comes home ──
+  cesar_returns: { speaker:"maria", portrait:"vulnerable", priority:13,
+    conditions:{ flag:"freed_cesar", totalProfitGte:60000, flagNot:"cesar_back", dealsSinceGte:4 },
+    lines:[
+      { text:"Maria calls at an hour she never calls, and her voice is doing something it has never done before: hurrying. “He’s at the gallery. He came off a plane from Panama City four hours ago with a duffel bag and a haircut somebody gave him with kitchen scissors.”", portrait:"vulnerable" },
+      { text:"César Santos is younger than you expected and thinner than the photograph, and he shakes your hand with the specific gratitude of a man who has been told exactly who paid for his freedom. He has also, you notice immediately, already located the bar cart.", portrait:"neutral" },
+      { text:"Maria watches him across the room. “He was better at this than all of us. That is not a compliment. Here is the honest sentence, cowboy: if you put him to work he will make you money for eleven weeks, and then he will make you a DEFENDANT.”", portrait:"knowing" },
+    ],
+    choices:[
+      { text:"Put him to work", reaction:"He is spectacular. He knows three suppliers you could never reach and one buyer you should not have. He also talks — in bars, to women, to men he assumes are those women’s cousins. Maria stops coming to the gallery on the days he is there.", effects:{ cashDelta:4000, cred:6, "npc.maria.trust":-1, "npc.ramirez.evidence":2, flags:["cesar_back","cesar_working"], montage:"Put Cesar Santos to work. He was spectacular. He was also loud." } },
+      { text:"Buy him a bus ticket somewhere boring — $3,000", reaction:"Gainesville. Three thousand dollars, an apartment deposit, and a promise you both know is a coin flip. Maria walks him to the station herself and comes back wearing sunglasses at nine o’clock at night. “Thank you,” she says, and then immediately, “we are not discussing this.”", effects:{ cashDelta:-3000, "npc.maria.trust":3, flags:["cesar_back","cesar_exiled"], montage:"Bought Cesar a bus ticket to Gainesville. Maria wore sunglasses at night." } },
+    ] },
+
+  cesar_eleven_weeks: { speaker:"maria", portrait:"angry", priority:12,
+    conditions:{ flag:"cesar_working", evidenceGte:9, flagNot:"cesar_arc_done", dealsSinceGte:4 },
+    lines:[
+      { text:"Eleven weeks, almost exactly. Maria puts a payphone number in front of you and does not sit down. “Metro-Dade picked him up on Washington Avenue with four grams and a mouth. He has been in an interview room for nine hours.”", portrait:"angry" },
+      { text:"“Nine hours is not nothing, to be fair to him. Most men are finished at ninety minutes.” She lights a cigarette she does not smoke and watches it burn down. “There is a lawyer named Broche. He costs nine thousand dollars and he gets people out before lunch.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Call Broche. Pay the nine.", reaction:"The lawyer arrives at 6 AM in a suit worth more than the charge, and César is on the street by ten having said, it turns out, absolutely nothing for nine hours. “He HELD,” Maria says, genuinely stunned. “I have never been so happy to be wrong about my own blood.”", effects:{ cashDelta:-9000, "npc.ramirez.evidence":-4, "npc.maria.trust":3, flags:["cesar_arc_done","cesar_held"], montage:"Paid Broche $9,000. Cesar held for nine hours and said nothing." } },
+      { text:"He got himself in there", reaction:"“Yes,” Maria agrees, and that is the entire conversation. By Thursday there is a new name in a file downtown and a detective who suddenly knows where you buy. César goes back to Panama, permanently. Maria answers the phone on the fourth ring now instead of the first.", effects:{ "npc.ramirez.evidence":4, "npc.maria.trust":-3, flags:["cesar_arc_done","cesar_burned"], montage:"Left Cesar in the room. He talked. Maria answers on the fourth ring now." } },
+    ] },
+
+  maria_empty_seat: { speaker:"maria", portrait:"knowing", priority:10,
+    conditions:{ flag:"sold_the_seat", totalProfitGte:70000, flagNot:"seat_regret", dealsSinceGte:4 },
+    lines:[
+      { text:"The gallery is between shows, which means it is a white room with a horse in it. Maria is doing inventory with a clipboard, which is the thing she does instead of feelings.", portrait:"neutral" },
+      { text:"“The plane went Tuesday, in case you were curious. It landed. The pilot mailed a postcard with nothing written on it, which is how he says everything is fine.” She does not look up. “Your seat went to a woman who owns four dry cleaners. She cried at wheels-up. It was embarrassing for everybody.”", portrait:"knowing" },
+      { text:"“There is a second charter in six weeks. Same pilot, worse plane, and the price is no longer friendly, because you taught me that our friendship has a RATE. Twenty-five thousand dollars.”", portrait:"amused" },
+    ],
+    choices:[
+      { text:"Buy the seat back — $25,000", reaction:"She writes it on the clipboard, which is somehow more binding than a contract. “Done. And cowboy — this one I do not resell. Not because I like you. Because I am tired of watching men be clever at exactly the wrong scale.”", effects:{ cashDelta:-25000, "npc.maria.trust":2, flags:["seat_regret","seat_rebought"], montage:"Bought back the seat you sold. Twenty-five thousand. No discount." } },
+      { text:"I made the right call", reaction:"“You made A call.” She turns a page on the clipboard. “In eleven years I have watched exactly one man leave Miami with money, and I have watched forty-two men be right about something. Those are the numbers. Do with them whatever you like.”", effects:{ cred:2, "npc.maria.trust":-1, flags:["seat_regret"], montage:"Told Maria you were right about the seat. She quoted you the numbers." } },
+    ] },
+
+  maria_prosecutor: { speaker:"maria", portrait:"knowing", priority:10,
+    conditions:{ flag:"high_society", credGte:28, flagNot:"prosecutor_met", dealsSinceGte:3 },
+    lines:[
+      { text:"Same mansion, different party, and the pool is still shaped like a dollar sign. Maria arrives at your elbow with two drinks and one piece of information. “Red dress, eleven o’clock. Diane Vance. Assistant United States Attorney, narcotics.”", portrait:"amused" },
+      { text:"“She has been at this party for forty minutes and she has not spoken to a single person who is not under indictment or adjacent to somebody who is. That is not a coincidence, cowboy. That is a WORK EVENT.”", portrait:"knowing" },
+      { text:"Vance crosses the room like the hostess invited her, which the hostess did, because in Coral Gables everybody collects everybody. “I know three things about you,” she says, in place of hello, “and two of them are boring.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Take her card", reaction:"The card is thick and the number handwritten on the back is a direct line, which means it is not a courtesy, it is a fishing line. “Call before it’s the only good idea left,” she says. “Everybody calls me eventually. The successful ones call early.” Maria watches this happen with an expression like weather.", effects:{ flags:["prosecutor_met","prosecutor_card"], montage:"Took a federal prosecutor's card. Direct line, handwritten." } },
+      { text:"Compliment the dress. Walk away.", reaction:"You tell her the dress is excellent and that you hope the government reimburses her for parking, and you leave her standing in a room full of criminals holding a plastic cup of chardonnay. She laughs. Twice. That is also on the record now.", effects:{ cred:4, "npc.ramirez.evidence":1, flags:["prosecutor_met"], montage:"Walked away from a federal prosecutor at a pool party. She laughed twice." } },
+    ] },
+
+  maria_overtown: { speaker:"maria", portrait:"vulnerable", priority:8,
+    conditions:{ flag:"maria_hates_crack", soldCrack:true, flagNot:"crack_amends", dealsSinceGte:5 },
+    lines:[
+      { text:"Maria drives you to Overtown at two in the afternoon, which is a thing she has never done, and parks across the street from an elementary school. She does not say anything for four minutes.", portrait:"neutral" },
+      { text:"“The woman on the steps in the blue shirt is Yolanda. Two years ago she kept the books for a shipping company on the river. She is thirty-four years old. Look at her hands, then look at me and tell me it is just business again — I am prepared to hear it. I only want you to say it HERE.”", portrait:"vulnerable" },
+    ],
+    choices:[
+      { text:"I'm done selling crack", reaction:"“Okay.” She starts the car. She does not thank you, does not soften, does not make it a moment — which is exactly how you know she believes you. Six blocks later: “There is more money in Coral Gables anyway. Rich people ruin themselves quietly and pay a premium for the privilege.”", effects:{ cred:-2, "npc.maria.trust":3, flags:["crack_amends","no_more_crack"], montage:"Sat outside a school in Overtown with Maria. Stopped selling crack." } },
+      { text:"It's just business, Maria", reaction:"She nods slowly, puts the car in gear, and drives you back without another word. At your corner she says, “Thank you for saying it here,” and means it, and you understand that you have just failed a test that was never going to be offered twice.", effects:{ cred:2, "npc.maria.trust":-3, flags:["crack_amends","said_it_in_overtown"], montage:"Said it was just business. In Overtown. Across from the school." } },
+    ] },
+
+  maria_causeway: { speaker:"maria", portrait:"flirty", priority:6,
+    conditions:{ "npc.maria.met":{eq:true}, nightOnly:true, locIn:[0], credGte:15, flagNot:"causeway_night", dealsSinceGte:4 },
+    lines:[
+      { text:"Maria makes you pull over halfway across the MacArthur Causeway at three in the morning and shut the engine off. The water is flat and black and the skyline is doing the thing it does, which is pretend to be a promise.", portrait:"neutral" },
+      { text:"“Every person in every one of those windows believes this city is about to give them something,” she says, sitting on the hood. “The waiters, the models, the Colombians, the CONGRESSMEN. Same disease. Miami is the only place on earth where it counts as a personality.”", portrait:"flirty" },
+      { text:"“I make you stop here because I want you to see it from the outside, once. From out here it is only lights. In there it is a machine, and the machine eats the people who forget the difference.”", portrait:"knowing" },
+    ],
+    choices:[
+      { text:"It's beautiful from here", reaction:"“It is. That is the trap — it is honestly beautiful, so you stay.” She gets back in the car and puts her sunglasses on top of her head at three in the morning. “Enough. One more sincere thought tonight and I will have to buy something to recover.”", effects:{ cred:1, "npc.maria.trust":1, flags:["causeway_night"], montage:"Stopped on the MacArthur at 3 AM. Saw it from the outside, once." } },
+      { text:"It's a market. That's all.", reaction:"“God, that’s bleak. Correct, but bleak.” She flicks a cigarette into Biscayne Bay, a felony for which nobody in the history of Florida has ever been charged. “Fine. Drive. The market opens in four hours and neither of us is a poet.”", effects:{ cred:2, flags:["causeway_night"], montage:"Called Miami a market from the middle of the causeway." } },
+    ] },
+
+  maria_wide_part: { speaker:"maria", portrait:"knowing", priority:10,
+    conditions:{ "npc.maria.met":{eq:true}, moveGte:55, totalProfitGte:80000, flagNot:"clock_late", dealsSinceGte:3 },
+    lines:[
+      { text:"Maria stopped asking when you are leaving, and you noticed about two weeks after she stopped. Tonight she says it plainly, in the dark gallery with the streetlight doing all the work: “You are not going to go.”", portrait:"knowing" },
+      { text:"“I have watched this exact month before. The money is good, the routes are quiet, everyone knows your name, and it feels like the beginning of something. It is not the beginning. It is the WIDE PART. Everything after this narrows.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"One more season", reaction:"“One more season.” She repeats it the way a doctor repeats a symptom back to a patient. “Write it down somewhere, so that when it happens you at least get to be right about it. That is worth something. Not very much. Something.”", effects:{ cred:3, flags:["clock_late","one_more_season"], montage:"Told Maria one more season. She repeated it like a symptom." } },
+      { text:"Then help me pick the day", reaction:"For the first time in months she looks genuinely surprised. Then she takes a pen and a gallery invoice and writes down four dates, a dollar figure, and one name. “That is the day. That is the number. That is the man. Do not improvise, cowboy — improvising is how everyone I have ever liked has died.”", effects:{ "npc.maria.trust":2, flags:["clock_late","picked_the_day"], montage:"Maria wrote four dates, a number and a name on a gallery invoice." } },
+    ] },
+
   maria_tip: { speaker:"maria", portrait:"amused", priority:9,
     conditions:{ totalProfitGte:5000, "npc.maria.trust":{gte:1}, flagNot:"maria_gave_tip", dealsSinceGte:2 },
     lines:[
@@ -514,6 +1321,103 @@ const STORY = {
     choices:[{ text:"It’s just business, Maria", reaction:"“My mother said the same thing about the hotel. ‘It’s just work, Maria.’ It’s never just anything.” She leaves her drink untouched. That’s how you know it’s serious.", effects:{ "npc.maria.trust":-2, flags:["maria_hates_crack"] } }] },
 
   // ── RAMIREZ ──
+  // ── ARC: ELENA — the detective's daughter (5 beats, branch pays off in the ending) ──
+  elena_contact_sheet: { speaker:"ramirez", portrait:"tired", priority:11,
+    conditions:{ "npc.ramirez.met":{eq:true}, evidenceGte:5, flagNot:"elena_met", dealsSinceGte:3 },
+    lines:[
+      { text:"Ramirez is sitting on the hood of the brown sedan with a manila envelope on his knee, eating a Cuban sandwich with the concentration of a man who missed lunch on Tuesday and is aware that it is now Thursday.", portrait:"neutral" },
+      { text:"“My kid takes pictures. Eighteen. Night classes at Miami-Dade, thinks this city is a SUBJECT instead of a place.” He slides a contact sheet across the hood. Thirty-six tiny frames of Overtown at dusk. “Frame nineteen.”", portrait:"tired" },
+      { text:"Frame nineteen is you. Half-turned, hand out, taking money on a corner that has never once been photographed for its architecture. “She doesn’t know what she got. She thinks it’s a picture about the light.”", portrait:"wry" },
+    ],
+    choices:[
+      { text:"She won't see me on that corner again", reaction:"“That’s the correct answer. It’s also the answer everybody gives me.” He folds the sheet back into the envelope like a man putting a bird back in a cage. “Elena. Her name is Elena. Now you know it, which means now it costs you something.”", effects:{ "npc.ramirez.trust":1, flags:["elena_met","elena_promise"], montage:"Ramirez showed you frame nineteen. Her name is Elena." } },
+      { text:"Keep your family out of my business", reaction:"“She walked into YOUR business, kid. With a camera her grandmother paid for.” He gets off the hood, brushing crumbs off a tie that stopped being fashionable during the Carter administration. “Fifteen years I’ve done this without hating anybody. Don’t be the one who ruins the record.”", effects:{ "npc.ramirez.evidence":1, "npc.ramirez.trust":-1, flags:["elena_met"], montage:"Told Ramirez to keep his family out of it. He remembered that." } },
+    ] },
+
+  elena_exhibition: { speaker:"maria", portrait:"knowing", priority:11,
+    conditions:{ flag:"elena_met", "npc.maria.met":{eq:true}, evidenceGte:7, flagNot:"elena_project", dealsSinceGte:4 },
+    lines:[
+      { text:"Maria has a habit of knowing your business before you have finished having it. Tonight she is holding a gallery mailer and wearing an expression you have learned to be afraid of.", portrait:"knowing" },
+      { text:"“Juried student show at the Center for Fine Arts. Thirty prints. It’s called THE ECONOMY OF LIGHT.” She taps a name on the mailer: E. RAMIREZ. “The girl is good, by the way. Genuinely good. That’s the inconvenient part.”", portrait:"amused" },
+      { text:"“Frame nineteen goes on a wall four blocks from the State Attorney’s office, blown up to a meter wide. A prosecutor will stand in front of it holding a plastic cup of chardonnay and he WILL recognize you, cowboy, because that is what prosecutors do at parties.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Buy the whole series, anonymously — $6,000", reaction:"Maria buys it through the gallery as an unnamed collector, which is the most Miami sentence ever constructed. The girl gets six thousand dollars and believes she has arrived. In a way she has. “She’ll shoot boats next,” Maria predicts. “Rich people adore boats.”", effects:{ cashDelta:-6000, "npc.maria.trust":1, "npc.ramirez.trust":1, flags:["elena_project","elena_bought"], montage:"Bought Elena Ramirez's entire show. Anonymously. $6,000." } },
+      { text:"Let it hang. Let them look.", reaction:"“Bold.” She refolds the mailer with surgical care. “You understand that this is how legends start AND how sentences do.” The show opens Thursday. Nine hundred people come through in three weeks. Two of them work for the government.", effects:{ cred:6, heatDelta:6, "npc.ramirez.evidence":3, flags:["elena_project","elena_published"], montage:"Let your face hang in a museum. Nine hundred people came." } },
+    ] },
+
+  elena_the_ask: { speaker:"ramirez", portrait:"tired", priority:12,
+    conditions:{ flag:"elena_project", evidenceGte:11, flagNot:"elena_asked", dealsSinceGte:3 },
+    lines:[
+      { text:"Four in the morning at a Denny’s on Biscayne. Ramirez has the corner booth and the look of a man who has been rehearsing in the car. There is no file on the table. That is how you know this is not police work.", portrait:"tired" },
+      { text:"“She’s going back to Overtown. Nights, now. She says the light is better and the people are honest, and she is RIGHT, which is the entire problem.” He turns his coffee cup a quarter turn. “I’ve told her. Her mother’s told her. She has my stubbornness and her mother’s nerve. God help the both of us.”", portrait:"tired" },
+      { text:"“So I am going to ask a criminal for a favor, and then I am going to go sit in my car for a while. Scare her off those corners. Not touch her — SCARE her. Be the thing she currently thinks is just an interesting shadow.”", portrait:"wry" },
+    ],
+    choices:[
+      { text:"I'll be the monster. Once.", reaction:"You wait under a dead streetlight and say four sentences you will remember for the rest of your life. She runs. She drops a lens cap and does not come back for it. Three days later a paper bag appears on your car: the lens cap, a page torn out of a file, and no note at all.", effects:{ cred:-4, "npc.ramirez.trust":2, "npc.ramirez.evidence":-4, flags:["elena_asked","elena_scared"], montage:"Scared Elena Ramirez off the corners. Four sentences. No note." } },
+      { text:"No. She's got your spine — respect it.", reaction:"He looks at you for a long moment and something in his face does an unfamiliar thing. “Yeah,” he says finally. “She does.” He pays for both coffees. “I’m still going to put you in prison. But I’m going to feel a way about it now, and I didn’t before.”", effects:{ "npc.ramirez.trust":2, "npc.ramirez.evidence":1, flags:["elena_asked","elena_respected"], montage:"Refused to scare Ramirez's daughter. He paid for the coffee." } },
+      { text:"Interesting. A detective with a pressure point.", reaction:"The temperature in the booth drops ten degrees. “I came here as a father,” he says, very quietly, “and you answered me as a dealer. Fine. Then that’s who I arrest.” He leaves cash on the table — exact, to the penny, including tax. You have just made an enemy of the only honest man in Dade County.", effects:{ cred:4, "npc.ramirez.trust":-4, "npc.ramirez.evidence":3, flags:["elena_asked","elena_used"], montage:"Threatened Ramirez with his own daughter. The booth got cold." } },
+    ] },
+
+  elena_the_debt: { speaker:"ramirez", portrait:"tired", priority:13,
+    conditions:{ flagAny:["elena_scared","elena_respected"], evidenceGte:14, flagNot:"elena_resolved", dealsSinceGte:2 },
+    lines:[
+      { text:"A shopping-center parking lot in Kendall, which is where men do the things they cannot do downtown. Ramirez has a cardboard box in the trunk and a lighter he borrowed from somebody, because he quit smoking in 1979 and has mentioned it every year since.", portrait:"neutral" },
+      { text:"“Two hundred and six pages in this box exist only because I wrote them down. Not evidence — INTELLIGENCE. The difference is a lawyer, but the difference is also me.” He lights the first page off the second. “She printed a photograph of me last month. I look old in it. I AM old in it.”", portrait:"tired" },
+      { text:"“This doesn’t make us friends and it doesn’t make you clean. It makes us two men who agreed about one thing, one time.” The box burns in a shopping cart behind a closed Zayre. A security guard looks at it for a while and decides it is not his problem.", portrait:"wry" },
+    ],
+    choices:[
+      { text:"Thank you, detective", reaction:"“Don’t.” He watches the last page curl. “Thank me by being GONE. Genuinely gone — not Fort Lauderdale gone. If I see you in this city in six months I will rebuild every page, and I will be faster the second time.”", effects:{ "npc.ramirez.evidence":-8, "npc.ramirez.trust":1, flags:["elena_resolved","ramirez_debt"], montage:"Ramirez burned 206 pages in a shopping cart behind a dead Zayre." } },
+      { text:"Rebuild it. I'll still be here.", reaction:"He laughs — an actual laugh, rusty from lack of use. “That is the most honest thing anybody has said to me all year.” He burns the pages anyway. “Consider it a head start. I have never given one before and I do not expect to enjoy the experience.”", effects:{ cred:5, "npc.ramirez.evidence":-6, flags:["elena_resolved","ramirez_debt"], montage:"Told Ramirez you'd stay. He gave you the head start anyway." } },
+    ] },
+
+  elena_vendetta: { speaker:"ramirez", portrait:"wry", priority:13,
+    conditions:{ flag:"elena_used", evidenceGte:13, flagNot:"elena_resolved", dealsSinceGte:2 },
+    lines:[
+      { text:"There is no meeting. There is a Tuesday when three people you trust stop returning calls, a Wednesday when your favorite payphone is suddenly out of order, and a Thursday when you understand that the brown sedan has not been behind you in eleven days because it no longer needs to be.", portrait:"neutral" },
+      { text:"He finally calls. No greeting. “I took two weeks of vacation,” Ramirez says. “First time since ’81. I spent all of it on you. Do you have any idea what a man can build in fourteen days when nobody is making him do paperwork?”", portrait:"wry" },
+      { text:"“My daughter asked why I was working on my vacation. I told her a man had threatened her with a smile. She said, ‘Dad, that’s awful.’ She’s eighteen. She still thinks awful is RARE.”", portrait:"tired" },
+    ],
+    choices:[
+      { text:"You've got nothing that sticks", reaction:"“I have your supplier’s cousin, your banker’s intern, and a wiretap on a payphone you are sentimental about.” A pause you could park a car in. “It doesn’t have to stick. It has to WEIGH.”", effects:{ heatDelta:12, "npc.ramirez.evidence":4, flags:["elena_resolved","ramirez_vendetta"], montage:"Ramirez spent his vacation on you. All fourteen days of it." } },
+      { text:"Name your price, detective", reaction:"The silence goes on long enough that you check the line. “Thirty-eight thousand a year,” he says at last. “That is the number you are fishing for. You should understand that I have known it every single day since 1971, and that it has never once been for sale.” Click.", effects:{ cred:-3, heatDelta:8, "npc.ramirez.evidence":3, flags:["elena_resolved","ramirez_vendetta"], montage:"Tried to buy Ramirez. He quoted you his salary and hung up." } },
+    ] },
+
+  ramirez_quiet_week: { speaker:"ramirez", portrait:"wry", priority:7,
+    conditions:{ "npc.ramirez.met":{eq:true}, fedHeatLte:10, totalProfitGte:60000, flagNot:"quiet_week", dealsSinceGte:4 },
+    lines:[
+      { text:"Ramirez is in line behind you at a Farm Store on Bird Road buying a lottery ticket and a banana, and he does not pretend to be surprised. “Relax. It’s my day off. I get those. There’s a rumor about them.”", portrait:"wry" },
+      { text:"“You’ve been quiet. Eleven days of quiet. You know what quiet does to a surveillance file? It makes it look like a MISTAKE. Two weeks of quiet and my captain reassigns me to a boat-theft ring in Hollywood.”", portrait:"tired" },
+      { text:"“So: congratulations. Sincerely. You are winning, in the specific way this thing is winnable — which is boringly, and for a while, and then not.” He buys the banana. He leaves the lottery ticket on the counter.", portrait:"wry" },
+    ],
+    choices:[
+      { text:"Take the day off, detective", reaction:"“I’m trying. My wife would tell you how that’s going.” He eats the banana in the parking lot next to a car that has not started on the first try since the Ford administration. “Stay quiet. Genuinely. It’s the only advice I hand out for free.”", effects:{ heatDelta:-4, "npc.ramirez.trust":1, flags:["quiet_week"], montage:"Ramirez said quiet was winning. Then he bought a banana." } },
+      { text:"Enjoy Hollywood", reaction:"“Boat theft,” he says wistfully. “Nobody dies in boat theft. My daughter would see me at dinner.” He looks at you a second too long. “And then some idiot would get loud in Overtown, and I would come back, and I would not be in a good mood about it.”", effects:{ cred:2, "npc.ramirez.evidence":1, flags:["quiet_week"], montage:"Wished Ramirez luck with the boat-theft ring in Hollywood." } },
+    ] },
+
+  ramirez_third_time: { speaker:"ramirez", portrait:"tired", priority:8,
+    conditions:{ "npc.ramirez.met":{eq:true}, bustsGte:2, flagNot:"two_busts", dealsSinceGte:3 },
+    lines:[
+      { text:"“Two arrests,” Ramirez says from the passenger seat of his own car, in a parking garage, with the door open and one foot on the ground like a man who has not decided whether he is staying. “Neither of them mine, which annoys me more than you can possibly imagine.”", portrait:"tired" },
+      { text:"“Here is a thing nobody tells you. The first arrest is an accident. The second is a pattern. The third is a SENTENCE. Judges in this county count to three out loud — it’s practically a ceremony, they enjoy it.”", portrait:"wry" },
+    ],
+    choices:[
+      { text:"There won't be a third", reaction:"“That is what the paperwork always says.” He shuts the door and rolls the window down, because the air conditioning has not worked in years. “For what it’s worth — and it is worth nothing — I hope you’re right. I have enough people in Coleman.”", effects:{ "npc.ramirez.trust":1, flags:["two_busts"], montage:"Ramirez explained how judges in Dade County count to three." } },
+      { text:"Third time's a charm, detective", reaction:"He laughs with no joy in it whatsoever. “You know what I like about this job? Nobody has ever surprised me. Not once in fifteen years.” The window goes up. Somewhere in Vice Intelligence a note is added to a file, and this one is not underlined, which is somehow worse.", effects:{ cred:2, "npc.ramirez.evidence":2, flags:["two_busts"], montage:"Told Ramirez third time's a charm. He stopped being surprised in 1971." } },
+    ] },
+
+  ramirez_proffer: { speaker:"ramirez", portrait:"neutral", priority:12,
+    conditions:{ flag:"prosecutor_card", evidenceGte:12, flagNot:"proffer_done", dealsSinceGte:3 },
+    lines:[
+      { text:"Room 411, federal building, a table with a scratch in it shaped almost exactly like Florida. AUSA Vance lays two documents side by side and does not sit down. Ramirez sits. Ramirez has brought his own thermos, because he does not trust the machine on four.", portrait:"neutral" },
+      { text:"“Proffer letter,” he says, tapping the left one. “You talk, and it can’t be used against you directly. Directly is doing a lot of work in that sentence, and she will tell you it isn’t.” Vance says, evenly, “It isn’t.” Ramirez drinks his coffee.", portrait:"tired" },
+      { text:"“Five years, of which you serve most of three, at a camp with a running track and a library. Versus what she asks for at trial, which is a number I do not say out loud in front of people who might faint in a federal building.”", portrait:"wry" },
+    ],
+    choices:[
+      { text:"Sign the proffer", reaction:"You talk for six hours. It is the least glamorous day of your criminal career and by far the most consequential. Your file stops being a case and becomes a COOPERATION, which is a different building entirely. Somewhere south, men who read the Herald carefully begin reading it about you.", effects:{ cred:-14, "npc.ramirez.evidence":-9, "npc.colombiano.trust":-3, flags:["proffer_done","proffer_signed","became_informant"], montage:"Signed the proffer in room 411. Six hours. Talked about everybody." } },
+      { text:"Not today, counselor", reaction:"Vance caps her pen with the finality of a woman who has just been handed a gift. “Good. Honestly. Half my convictions are men who signed that thing badly.” In the elevator Ramirez says, to nobody in particular, “That’s the one I’d have picked too,” and then does not speak to you for a month.", effects:{ cred:6, "npc.ramirez.evidence":2, flags:["proffer_done","refused_proffer"], montage:"Refused the proffer. Vance capped her pen and looked disappointed." } },
+    ] },
+
   ramirez_intro: { speaker:"ramirez", portrait:"neutral", priority:15,
     conditions:{ fedHeatGte:15, "npc.ramirez.met":{eq:false} },
     lines:[
@@ -560,6 +1464,99 @@ const STORY = {
     ] },
 
   // ── EL COLOMBIANO ──
+  // ── ARC: NINETY-SIX PERCENT — the cartel's chemist (3 beats, 3-way branch, two echoes) ──
+  col_chemist: { speaker:"colombiano", portrait:"pleased", priority:11,
+    conditions:{ flag:"cartel_supplier", totalProfitGte:70000, flagNot:"chemist_met", dealsSinceGte:3 },
+    lines:[
+      { text:"A warehouse in Doral that smells like ether and orange peel. El Colombiano walks you past forty drums of something entirely legal to one small table with a scale on it, where a thin man in reading glasses is doing something delicate with a beaker.", portrait:"neutral" },
+      { text:"“This is Aurelio. In Medellín he is a national resource. He is HERE because a man who is a national resource is also a national liability, and I prefer my resources where I can see them. Aurelio — tell the man your number.”", portrait:"pleased" },
+      { text:"Aurelio does not look up. “Ninety-four,” he says. “Ninety-six if the acetone is not from Hialeah.” El Colombiano beams like a father at a recital. “Ninety-six. Do you understand what that does to a market, friend? This city has been drinking WATER and calling it rum.”", portrait:"pleased" },
+    ],
+    choices:[
+      { text:"Put me on his output", reaction:"“That is the correct greed.” Your shipments start coming out of Doral, and for a while every corner in Miami tastes the difference and pays for it. Aurelio never looks up. Not once, not in nine weeks. You begin to notice that.", effects:{ "npc.colombiano.trust":2, demandBoost:{idx:5,mult:1.45}, flags:["chemist_met"], montage:"Got on Aurelio's output. Ninety-six percent, and the city noticed." } },
+      { text:"Why show me this?", reaction:"“Because a man who is shown a thing becomes responsible for it.” He says it pleasantly, adjusting a cuff. “That is not a threat, friend, it is a DEFINITION. In my business we do not have contracts. We have people who have been shown things.”", effects:{ "npc.colombiano.trust":1, flags:["chemist_met","chemist_wary"], montage:"El Colombiano showed you the chemist. That made you responsible." } },
+    ] },
+
+  chemist_defects: { speaker:"maria", portrait:"knowing", priority:12,
+    conditions:{ flag:"chemist_met", fedHeatGte:35, flagNot:"chemist_resolved", dealsSinceGte:4 },
+    lines:[
+      { text:"Maria calls you to the gallery at closing and locks the door behind you, which she has never done. A man is sitting on the bench in front of the sad horse painting, holding a briefcase on his knees like a passenger waiting for a bus.", portrait:"neutral" },
+      { text:"“He walked into MY gallery,” she says, in the voice of a woman itemizing damages. “Aurelio. The cook. He has a sister in Costa Rica, eleven thousand dollars, and a suitcase that is mostly notebooks, and he believes that is a plan.”", portrait:"knowing" },
+      { text:"“So now you have three doors, cowboy, and every one of them locks behind you. Get him out. Sell him to the detective. Or hand him back to the man in the cream suit and then sleep however it is that you sleep.”", portrait:"amused" },
+    ],
+    choices:[
+      { text:"Get him out. Costa Rica. — $12,000", reaction:"It costs twelve thousand, a night boat out of Tavernier, and a driver who does not ask questions. Aurelio shakes your hand with both of his and says a word in a language you do not speak. Maria watches the taillights. “Well,” she says. “That was expensive AND correct. Enjoy the novelty.”", effects:{ cashDelta:-12000, cred:4, "npc.maria.trust":2, "npc.colombiano.trust":-3, flags:["chemist_resolved","chemist_freed"], montage:"Put the cartel's chemist on a night boat out of Tavernier." } },
+      { text:"Sell him to Ramirez", reaction:"A detective meets a chemist in a federal building at 6 AM, and by noon a warehouse in Doral belongs to the government. Your file gets thinner. So does the list of people who will meet you alone. Maria does not call for nine days, and when she does it is about something else.", effects:{ cred:-8, "npc.ramirez.evidence":-6, "npc.maria.trust":-2, "npc.colombiano.trust":-4, flags:["chemist_resolved","chemist_sold","became_informant"], montage:"Sold Aurelio to Vice. The Doral warehouse belongs to the government now." } },
+      { text:"Call the cream suit", reaction:"El Colombiano thanks you personally, which is the part you will think about later. Ten thousand dollars arrives in a shoebox with a bottle of rum on top. Nobody sees Aurelio again. The product stays at ninety-six percent for exactly two more months, and then it doesn’t.", effects:{ cashDelta:10000, "npc.colombiano.trust":3, "npc.maria.trust":-2, flags:["chemist_resolved","chemist_delivered"], montage:"Handed the chemist back. A shoebox, a bottle of rum, no questions." } },
+    ] },
+
+  chemist_postcard: { speaker:"maria", portrait:"amused", priority:7,
+    conditions:{ flag:"chemist_freed", flagNot:"chemist_echo", dealsSinceGte:5 },
+    lines:[
+      { text:"A postcard reaches the gallery: a pelican, a pier, and eight sentences of extremely careful handwriting that never once says a name. Folded into the envelope it arrived in, four thousand dollars in American twenties.", portrait:"amused" },
+      { text:"“He teaches chemistry at a secondary school now,” Maria reports, reading it twice. “He says the students are terrible and the acetone is excellent.” She looks up. “You understand that this never happens. In eleven years I have never once watched a man get OUT.”", portrait:"knowing" },
+    ],
+    choices:[
+      { text:"Frame the money with the postcard", reaction:"She hangs it between two paintings nobody will ever buy — real money behind glass, priced at forty thousand dollars. “It’s the only honest object in this gallery,” she says, “so obviously it is the one thing I will never sell.”", effects:{ cred:2, "npc.maria.trust":2, flags:["chemist_echo","postcard_framed"], montage:"A postcard from Puntarenas, framed with four thousand dollars behind glass." } },
+      { text:"Take the four grand", reaction:"“Of course you do.” She hands it over without judgment, which from Maria is its own particular kind of judgment. The postcard she keeps. It goes in a drawer with the two other things she has ever kept.", effects:{ cashDelta:4000, flags:["chemist_echo"], montage:"Took the chemist's four thousand dollars. Maria kept the postcard." } },
+    ] },
+
+  chemist_letters: { speaker:"colombiano", portrait:"pleased", priority:7,
+    conditions:{ flag:"chemist_delivered", flagNot:"chemist_echo", dealsSinceGte:5 },
+    lines:[
+      { text:"El Colombiano takes you to dinner at a place with no menu and orders in Spanish without looking up, exactly as he did the first time. “A toast, friend. To loyalty — rarer than product, and priced about the same.”", portrait:"pleased" },
+      { text:"Halfway through the fish he says, conversationally, “Aurelio’s sister writes to the consulate every week. Every WEEK. The letters are very well constructed. She was a teacher also.” He eats. “Some families produce nothing but careful people.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Say nothing. Finish the fish.", reaction:"You finish the fish. It is excellent. You will eat this exact meal again in your sleep for a long time, and in the dream you never say anything either, and the not-saying is the part that wakes you up at four in the morning.", effects:{ hpDelta:-6, "npc.colombiano.trust":1, flags:["chemist_echo"], montage:"Finished the fish. Said nothing at all about the letters." } },
+      { text:"Send the sister money. Anonymously.", reaction:"Two thousand dollars reaches Puntarenas with no name attached, which is exactly as much help as it sounds like. El Colombiano never mentions it and never will — but a month later he seats you facing the door, which in his language is either respect or a test.", effects:{ cashDelta:-2000, cred:2, "npc.colombiano.trust":-1, flags:["chemist_echo","sent_the_sister_money"], montage:"Sent the chemist's sister money. No name on it." } },
+    ] },
+
+  col_informant_found: { speaker:"colombiano", portrait:"cold", priority:13,
+    conditions:{ flag:"became_informant", "npc.colombiano.met":{eq:true}, flagNot:"informant_exposed", dealsSinceGte:4 },
+    lines:[
+      { text:"The restaurant is empty again, and this time nobody has poured anything. El Colombiano has the Herald folded to page four and a fountain pen, and he is doing the crossword in ink, which tells you everything about his relationship with certainty.", portrait:"neutral" },
+      { text:"“Three of my people were arrested in one week. Different corners, different crews, one COMMON element.” He fills in seven across without pausing. “In Medellín we would already be finished talking. Here I am a guest in a country with excellent forensics, so I talk first. Enjoy the innovation.”", portrait:"cold" },
+    ],
+    choices:[
+      { text:"Buy the conversation — $30,000", reaction:"The money crosses the table under the newspaper, which is either tradition or theater. He does not count it. “This purchases the CONVERSATION, friend. Not forgiveness. Forgiveness is not a product I stock.” He returns to the crossword. You are permitted to leave, which is not nothing.", effects:{ cashDelta:-30000, "npc.colombiano.trust":1, flags:["informant_exposed","bought_the_conversation"], montage:"Paid $30,000 under a newspaper to be allowed to walk out of a restaurant." } },
+      { text:"Prove it was me", reaction:"“Prove.” He tastes the word and finds it foreign. “That is a courtroom verb, friend. You have been spending time in courtrooms — it shows.” He caps the pen. You are followed home by a car that makes no effort whatsoever to be discreet, and the following continues for eleven days.", effects:{ hpDelta:-10, heatDelta:10, "npc.colombiano.trust":-4, flags:["informant_exposed","col_hunting"], montage:"Told the cartel to prove it. A car followed you home for eleven days." } },
+    ] },
+
+  col_war_corner: { speaker:"colombiano", portrait:"cold", priority:11,
+    conditions:{ flag:"col_war", credGte:30, flagNot:"col_war_corner", dealsSinceGte:3 },
+    lines:[
+      { text:"They took the corner on 62nd at four in the morning with nine men and no shooting, which is worse, because it means they were confident. Two of your people are at Jackson Memorial. One of them will be fine. One of them will walk with a cane at twenty-three.", portrait:"cold" },
+      { text:"El Colombiano telephones you himself, which is its own species of insult. “I want to be very clear that this was BUSINESS,” he says. “The boy with the leg was not instructed. My man exceeded his brief. He has been corrected.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Take it back tonight", reaction:"You take it back with fourteen men and a great deal of noise, and by dawn the corner is yours and everyone in three districts has heard about it. Vice hears about it too, obviously. The Herald runs it on page seven under a photograph of an overturned shopping cart.", effects:{ cred:8, heatDelta:9, "npc.colombiano.trust":-2, "npc.ramirez.evidence":2, flags:["col_war_corner","took_it_back"], montage:"Took the corner on 62nd back before dawn. Page seven." } },
+      { text:"Send $5,000 to the kid's family instead", reaction:"The money goes to a house on 58th with no name attached and a note that reads only WALK GOOD. You never take the corner back. Something else happens instead: for a long while, people in Overtown start telling you things they do not tell anybody.", effects:{ cashDelta:-5000, cred:4, flags:["col_war_corner","walk_good"], montage:"Sent $5,000 to the kid's family. Never took the corner back." } },
+    ] },
+
+  col_joint_venture: { speaker:"colombiano", portrait:"pleased", priority:9,
+    conditions:{ flag:"col_peace", totalProfitGte:110000, flagNot:"col_venture", dealsSinceGte:4 },
+    lines:[
+      { text:"“Peace is expensive,” El Colombiano says, in a marina office that smells like varnish and money, “which is why so few men can afford it. Fortunately you and I are not men. We are a JOINT VENTURE.”", portrait:"pleased" },
+      { text:"“A go-fast comes into Ocean Reef on Thursday. Twenty units at my cost — which nobody outside my family has ever been offered, and which you will not mention at parties. Twenty-two thousand dollars, and the two of us stop paying a war tax that we were both pretending was strategy.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Buy in — $22,000", reaction:"The boat comes in at 3 AM with its lights off and its motors trimmed, and twenty units go into your trunk while a man in a polo shirt talks about tarpon fishing the entire time. “You see?” El Colombiano says. “Business. It is so much more restful than the other thing.”", effects:{ cashDelta:-22000, invGift:{idx:5,qty:20}, "npc.colombiano.trust":2, flags:["col_venture"], montage:"Bought into the Ocean Reef go-fast. Twenty units at cartel cost." } },
+      { text:"I buy my own product", reaction:"“Of course.” He is not offended; he is CATALOGUING. “Independence. It is the most expensive thing in this city, and every man here buys it retail.” The peace holds. It holds slightly less well than it did an hour ago.", effects:{ cred:2, "npc.colombiano.trust":-1, flags:["col_venture","stayed_independent"], montage:"Turned down the cartel's joint venture. Kept your own supply lines." } },
+    ] },
+
+  col_departures: { speaker:"colombiano", portrait:"neutral", priority:12,
+    conditions:{ flag:"col_broken", flagNot:"col_after", dealsSinceGte:2 },
+    lines:[
+      { text:"You find him in the departures hall at MIA at six in the morning, alone, with one suitcase and a boarding pass for Barranquilla via a connection nobody sane would book. The cream suit is the same suit. It has been the same suit for three weeks.", portrait:"neutral" },
+      { text:"“They have decided that I am unlucky,” he says, watching the board flip. “In my organization there is no crime called losing. There is only a condition called unlucky, and it is treated identically. So: home, a farm, and a telephone that does not ring.”", portrait:"cold" },
+      { text:"“You will have all of it now. The corners, the routes, the men who called me señor.” He almost smiles. “And in four years, or eight, a young man will stand in this hall and watch YOUR board flip. I want you to know that I will not enjoy it. I will simply have expected it.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Safe flight, señor", reaction:"He shakes your hand with both of his — exactly the way a chemist once did — and walks to a gate at the far end of the terminal without looking back. The suitcase is very light. Whatever he built in this city, he is not carrying any of it home.", effects:{ cred:5, flags:["col_after","col_exile_witnessed"], montage:"Watched El Colombiano leave MIA with one very light suitcase." } },
+      { text:"You should have taken the peace", reaction:"“Yes,” he agrees immediately, which robs you of everything. “That is the correct analysis. I have had eleven days to arrive at it and you have had four seconds.” He picks up the suitcase. “That is why you win, friend. You are FASTER at being right. It is not the same thing as being right.”", effects:{ cred:3, flags:["col_after","col_exile_witnessed"], montage:"Told a beaten man he should have taken the peace. He agreed instantly." } },
+    ] },
+
   colombiano_intro: { speaker:"colombiano", portrait:"neutral", priority:15,
     conditions:{ "npc.colombiano.met":{eq:false}, orGroup:{ totalProfitGte:50000, credGte:40, turfGte:3 } },
     lines:[
@@ -612,6 +1609,26 @@ const meetsConditions=(conds,s)=>{
     else if(k==="soldCrack"){ if(!s.storyFlags?.sold_crack) return false; }
     else if(k==="flag"){ if(!s.storyFlags?.[v]) return false; }
     else if(k==="flagNot"){ if(s.storyFlags?.[v]) return false; }
+    else if(k==="flagAll"){ for(const f of v){ if(!s.storyFlags?.[f]) return false; } }
+    else if(k==="flagAny"){ if(!v.some(f=>s.storyFlags?.[f])) return false; }
+    else if(k==="flagNone"){ if(v.some(f=>s.storyFlags?.[f])) return false; }
+    else if(k==="moveGte"){ if((s.move||0)<v) return false; }
+    else if(k==="cashLte"){ if((s.cash||0)>v) return false; }
+    else if(k==="liquidLte"){ if((s.cash||0)+(s.bank||0)+(s.cleanCash||0)>v) return false; }
+    else if(k==="fedHeatLte"){ if((s.fedHeat||0)>v) return false; }
+    else if(k==="credLte"){ if((s.cred||0)>v) return false; }
+    else if(k==="hpLte"){ if((s.hp||0)>v) return false; }
+    else if(k==="hpGte"){ if((s.hp||0)<v) return false; }
+    else if(k==="evidenceLte"){ if(ev>v) return false; }
+    else if(k==="eraGte"){ if((s.currentEra||0)<v) return false; }
+    else if(k==="eraLte"){ if((s.currentEra||0)>v) return false; }
+    else if(k==="bustsGte"){ if((s.totalBusts||0)<v) return false; }
+    else if(k==="turfLte"){ if((s.turf||[]).filter(t=>t>0).length>v) return false; }
+    else if(k==="invGte"){ if((s.inv||[]).reduce((a,b)=>a+b,0)<v) return false; }
+    else if(k==="locIn"){ if(!v.includes(s.loc)) return false; }
+    else if(k==="nightOnly"){ if((((s.move||0)%2)===1)!==!!v) return false; }
+    else if(k==="hasGun"){ if(!!s.gun!==!!v) return false; }
+    else if(k==="hasLifestyle"){ if(!(s.lifestyle||[]).includes(v)) return false; }
     else if(k==="orGroup"){
       let ok=false;
       if(v.totalProfitGte!=null && (s.totalProfit||0)>=v.totalProfitGte) ok=true;
@@ -645,6 +1662,15 @@ const applyChoiceEffects=(s,eff)=>{
     else if(k==="launderPct"){ const amt=Math.floor(ns.cash*v.pct); const fee=Math.floor(amt*v.fee);
       ns.cash-=amt; ns.cleanCash=(ns.cleanCash||0)+amt-fee; }
     else if(k==="cleanDelta") ns.cleanCash=(ns.cleanCash||0)+v;
+    else if(k==="hpDelta") ns.hp=CL((ns.hp||0)+v,0,100);
+    else if(k==="bankDelta") ns.bank=Math.max(0,(ns.bank||0)+v);
+    else if(k==="gun") ns.gun=!!v;
+    else if(k==="coatDelta") ns.coatSp=Math.max(20,(ns.coatSp||0)+v);
+    else if(k==="demandBoost"){ ns.demand=ns.demand.map((d,i)=>i===v.idx?Math.max(.4,d*v.mult):d); }
+    else if(k==="invGift"){
+      const room=Math.max(0,(ns.coatSp||0)-ns.inv.reduce((a,b)=>a+b,0)), qty=Math.min(v.qty,room);
+      if(qty>0){ const inv=[...ns.inv], ac=[...ns.avgCost], pre=inv[v.idx];
+        ac[v.idx]=Math.round((ac[v.idx]*pre)/(pre+qty)); inv[v.idx]=pre+qty; ns.inv=inv; ns.avgCost=ac; } }
     else if(k==="cred") ns.cred=CL(ns.cred+v,0,100);
     else if(k==="flags") v.forEach(f=>ns.storyFlags[f]=true);
     else if(k==="montage") ns.montage.push({move:ns.move,text:v});
@@ -702,7 +1728,21 @@ const generateNarrative=s=>{
   if(s.npcState?.cass?.trust>=2) npcLines.push("A Brickell bank closed four accounts the same morning. 'Routine housekeeping,' said a manager with a new tan.");
   if(s.storyFlags?.shark_grudge) npcLines.push("A man at the fish market, asked if he knew the subject, gutted a snapper and said nothing at all.");
   if(s.storyFlags?.cartel_supplier) npcLines.push("Federal sources allege ties to Medellín. Medellín, as always, alleges nothing.");
-  return [opener, `The run lasted ${days} days.`, ...beats.slice(0,2), ...npcLines.slice(0,2)].join(" ");
+  const coda=[], fl=s.storyFlags||{};
+  if(fl.ramirez_debt) coda.push("Det. H. Ramirez filed his retirement papers in the spring. Colleagues recall a cardboard box burning in a shopping cart behind a closed department store, and no explanation ever offered.");
+  else if(fl.ramirez_vendetta) coda.push("A detective who had not taken a vacation since 1981 took two weeks. Sources familiar with the resulting file describe it as “unusually personal.”");
+  if(fl.elena_published) coda.push("A student photograph titled FRAME NINETEEN hangs in a permanent collection four blocks from the State Attorney’s office. The subject has never been identified.");
+  if(fl.chemist_freed) coda.push("A secondary-school chemistry teacher in Puntarenas, reached by telephone, said he had never been to Florida, and then hung up very politely.");
+  else if(fl.chemist_delivered) coda.push("A warehouse in Doral changed hands quietly last quarter. So, apparently, did a chemist.");
+  if(fl.shark_loyal_final) coda.push("At a fish market on the river, an old man still guts snapper at 6 AM and still owns his own name.");
+  else if(fl.shark_heir) coda.push("A car wash in Tampa reopened under new ownership. Its books, associates note admiringly, are accurate to the gram.");
+  if(fl.cesar_held) coda.push("César Santos, released without charge after nine hours of silence, sells boats in Gainesville now and lies cheerfully about why he left.");
+  else if(fl.cesar_burned) coda.push("A man deported to Panama gave a statement on his way out. It ran four pages and it named exactly one person.");
+  if(fl.walk_good) coda.push("A family on 58th Street received five thousand dollars and a note reading only WALK GOOD. They kept the note. They framed it.");
+  if(fl.no_more_crack) coda.push("Corners in Overtown that had one steady supplier in the spring had none at all by the end of summer. Nobody has ever explained it.");
+  if(fl.proffer_signed) coda.push("Federal filings identify a cooperating witness by number only. The number appears eleven times.");
+  if(fl.postcard_framed) coda.push("A Coral Gables gallery lists a framed postcard at forty thousand dollars. It is not for sale, which the owner considers the entire point.");
+  return [opener, `The run lasted ${days} days.`, ...beats.slice(0,2), ...npcLines.slice(0,2), ...coda.slice(0,2)].join(" ");
 };
 const ENDING_HEADLINES={
   bust:["KINGPIN FALLS IN DAWN RAID","VICE NETS BIGGEST FISH YET"],
@@ -728,6 +1768,10 @@ const ACHIEVEMENTS=[
   { id:"storyteller", icon:"\ud83d\udcd6", name:"Storyteller",      desc:"Live 8+ scenes in one run",           test:(g,nw)=>Object.keys(g.storySeen||{}).length>=8 },
   { id:"hurricane",   icon:"\ud83c\udf00", name:"Eye of the Storm", desc:"Trade through the hurricane",         test:(g,nw)=>!!g.storyFlags?.hurricane_done },
   { id:"conquistador",icon:"\u2694\ufe0f", name:"Conquistador",     desc:"Break El Colombiano's empire",        test:(g,nw)=>!!g.storyFlags?.col_broken },
+  { id:"frame_19",   icon:"📷", name:"Frame Nineteen",   desc:"Make an honest cop burn his own file", test:(g,nw)=>!!g.storyFlags?.ramirez_debt },
+  { id:"succession", icon:"🐟", name:"The Succession",   desc:"Keep Tiburon's name on Tiburon's book", test:(g,nw)=>!!g.storyFlags?.shark_loyal_final },
+  { id:"ninety_six", icon:"⚗️", name:"Ninety-Six",       desc:"Put the cartel's chemist on a boat",    test:(g,nw)=>!!g.storyFlags?.chemist_freed },
+  { id:"keeper",     icon:"🚌", name:"Brother's Keeper", desc:"Get Cesar Santos out of the room",      test:(g,nw)=>!!(g.storyFlags?.cesar_held||g.storyFlags?.cesar_exiled) },
 ];
 const DEFAULT_META={ rep:0, totalRep:0, runs:0, bestNW:0, wins:0, maxHeatBeaten:-1, upgrades:{}, sound:true, lastDaily:null, ach:{}, endings:{}, topRuns:[], biggestDeal:0 };
 let MEM_META=null;
@@ -818,6 +1862,10 @@ const createInitialState=(heatLevel=0,playbook=null,daily=null,upgrades={})=>{
     pagerDeal:null, evtMsg:null, activeStorylet:null,
     hudSeen:{ debt:false, hp:false, heat:false, cred:false, era:false },
     coach:{}, ending:null,
+    locDemand:initLocDemand(), patrols:initPatrols(), informants:initInformants(),
+    districtSales:LOCS.map(()=>0), shocks:[], newsWire:[], forfeitFuse:0,
+    rival:initRival(), rivalFocus:RIVAL_NAMES.slice(0,3).map(()=>R(0,DRUG_COUNT-1)),
+    enfLoyalty:LOCS.map(()=>100), launderMove:-1, launderUse:{}, launderedTotal:0,
   };
   s=applyUpgrades(s,upgrades);
   s=applyPlaybook(s,playbook);
@@ -848,6 +1896,7 @@ function processTravel(s,destLoc){
   const newMom=evolveMomentum(s.momentum);
   const newBase=evolveBasePrices(s.basePrices,newMom,evtDrug,evtType,evtMulti);
   const np=getStreetPrices(newBase,destLoc,era.demandMod,s.demand,s.dailyPriceMulti||1);
+  applyMarketPrices(s,destLoc,np);
   const newHist=s.hist.map((h,i)=>[...h.slice(-9),np[i]]);
 
   // Heat decay & floor
@@ -862,7 +1911,7 @@ function processTravel(s,destLoc){
   // Police roll
   const hl=HEAT_LADDER[s.heatLevel||0]||HEAT_LADDER[0];
   const wealthMod=s.cash>=500000?1.6:s.cash>=250000?1.4:s.cash>=100000?1.2:1;
-  const policeEff=LOCS[destLoc].heat*0.5*era.copsMod*hl.copsMod*(s.playbookCopsMod||1)*(s.dailyCopsMod||1)*(1+(s.upgradeHeatMod||0))*(1+nh/300)*(isNight?1.2:1)*wealthMod;
+  const policeEff=LOCS[destLoc].heat*0.5*era.copsMod*hl.copsMod*(s.playbookCopsMod||1)*(s.dailyCopsMod||1)*(1+(s.upgradeHeatMod||0))*(1+nh/300)*(isNight?1.2:1)*wealthMod*districtRisk(s,destLoc);
   if(Math.random()<policeEff && usedSp>0){
     effects.push({type:"SFX",name:"police"},{type:"SCREEN",screen:"police"});
     if(!s.hudSeen.heat) effects.push({type:"PING",stat:"heat"});
@@ -884,8 +1933,8 @@ function processTravel(s,destLoc){
   if(nm%4===0&&bank>0) bank=Math.floor(bank*1.03);
 
   // Empire income
-  const turfIncome=s.turf.reduce((sum,lv)=>sum+TURF_LEVELS[lv].income,0);
-  const enfUpkeep=s.enforcers.reduce((sum,e)=>sum+e*ENFORCER_UPKEEP,0);
+  const turfIncome=empireIncome(s);
+  const enfUpkeep=crewUpkeep(s);
   const empNet=turfIncome-enfUpkeep;
   cash+=empNet;
   if(empNet>0) effects.push({type:"SPAWN",text:`+${FM(empNet)} turf`,color:C.gold,y:.55});
@@ -1072,10 +2121,17 @@ function processTravel(s,destLoc){
         npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+3,0,20);
       } else {
         const dq=d.rivalBought?Math.ceil(d.qty/2):d.qty;
-        dealInvAdd={idx:d.drugIdx,qty:dq};
-        evtMsg=`📦 Shipment landed. ${dq}× ${DRUGS[d.drugIdx].name} in your bag. Street value ~${FM(dq*np[d.drugIdx])}.`;
-        effects.push({type:"SFX",name:"pager"},{type:"SPAWN",text:`+${dq} ${DRUGS[d.drugIdx].emoji}`,color:C.gold,y:.45},
-          {type:"DEAL_SCENE",data:{kind:"shipment",emoji:DRUGS[d.drugIdx].emoji,qty:dq,cash:0}});
+        // Every other inventory add is clamped to coatSp; this one was not, so
+        // a shipment landing into a full bag pushed it past capacity (126/100).
+        const dealRoom=Math.max(0,(s.coatSp||0)-s.inv.reduce((a,b)=>a+b,0));
+        const landed=Math.min(dq,dealRoom), spilled=dq-landed;
+        // The deal was paid for up front, so it carries a real cost basis.
+        // Landing it at avgCost 0 booked the entire sale as profit, which also
+        // permanently raised the heat floor via totalProfit.
+        dealInvAdd={idx:d.drugIdx,qty:landed,unit:Math.round(d.cost/Math.max(1,d.qty))};
+        evtMsg=`📦 Shipment landed. ${landed}× ${DRUGS[d.drugIdx].name} in your bag. Street value ~${FM(landed*np[d.drugIdx])}.${spilled>0?` No room for ${spilled} — left in the boat.`:""}`;
+        effects.push({type:"SFX",name:"pager"},{type:"SPAWN",text:`+${landed} ${DRUGS[d.drugIdx].emoji}`,color:C.gold,y:.45},
+          {type:"DEAL_SCENE",data:{kind:"shipment",emoji:DRUGS[d.drugIdx].emoji,qty:landed,cash:0}});
         activeDeal=null;
       }
     }
@@ -1171,17 +2227,32 @@ function processTravel(s,destLoc){
     stashInv:zeroStash?Array(DRUG_COUNT).fill(0):s.stashInv,
     inv:(()=>{let iv=dealInvAdd?s.inv.map((q,i)=>i===dealInvAdd.idx?q+dealInvAdd.qty:q):s.inv;
       if(hurricaneLoss) iv=iv.map(q=>q-Math.ceil(q*0.3)); return iv;})(),
+    // Blend the shipment's real unit cost into the running average, otherwise
+    // selling it books 100% profit against a zero basis.
+    avgCost:(()=>{
+      if(!dealInvAdd||dealInvAdd.qty<=0) return s.avgCost;
+      const i=dealInvAdd.idx, had=s.inv[i]||0, add=dealInvAdd.qty, tot=had+add;
+      if(tot<=0) return s.avgCost;
+      const blended=((had*(s.avgCost[i]||0))+(add*(dealInvAdd.unit||0)))/tot;
+      return s.avgCost.map((v,k)=>k===i?blended:v);})(),
     dealsSinceStory:(s.dealsSinceStory||0),
     rivals:s.rivals.map(v=>({...v,loc:Math.random()<.3?R(0,5):v.loc})),
   };
+  // ── LIVING CITY — district demand, shocks, patrols, informants, crew, rival ──
+  const world=worldTick(s,out,{turfWar,dealEvent,randEnc});
+  Object.assign(out,world.patch);
+  for(const we of world.effects) effects.push(we);
+  if(world.evtMsg) out.evtMsg=world.evtMsg;
+  const worldTurfWar=world.turfWar, worldEvent=world.worldEvent;
+
   // Storylet selection happens AFTER other modals resolve, only if nothing big fired
-  const blocked=effects.some(e=>e.type==="SCREEN"||e.type==="GAME_OVER")||newspaper||randEnc||turfWar||dealEvent||eraShift;
+  const blocked=effects.some(e=>e.type==="SCREEN"||e.type==="GAME_OVER")||newspaper||randEnc||turfWar||worldTurfWar||worldEvent||dealEvent||eraShift;
   let storylet=null;
   if(!blocked){
     storylet=selectStorylet(out);
     if(storylet){ out.storySeen={...out.storySeen,[storylet.id]:true}; out.activeStorylet=storylet; out.dealsSinceStory=0; }
   }
-  return { state:out, effects, newspaper, randEnc, turfWar, dealEvent, eraShift };
+  return { state:out, effects, newspaper, randEnc, turfWar:turfWar||worldTurfWar, dealEvent, eraShift, worldEvent };
 }
 
 function processBuy(s,drugIdx,amt){
@@ -1204,7 +2275,7 @@ function processBuy(s,drugIdx,amt){
   inv[drugIdx]+=amt;
   const supplierHistory={...s.supplierHistory,[s.loc]:((s.supplierHistory||{})[s.loc]||0)+1};
   const demand=s.demand.map((d,i)=>i===drugIdx?Math.max(.4,d*.97):d);
-  return { state:{...s, cash:s.cash-cost, inv, avgCost, purity, supplierHistory, demand,
+  return { state:{...s, ...tradeMarketPatch(s,drugIdx,amt,"buy"), cash:s.cash-cost, inv, avgCost, purity, supplierHistory, demand,
     totalDeals:(s.totalDeals||0)+1, dealsSinceStory:(s.dealsSinceStory||0)+1,
     fedHeat:CL(s.fedHeat+(amt>20?2:amt>8?1:0),0,100) }, ok:true, effects };
 }
@@ -1259,7 +2330,7 @@ function processSell(s,drugIdx,amt){
   }
   const hudSeen={...s.hudSeen};
   if(!hudSeen.cred&&CL(s.cred+credGain,0,100)>=10){ hudSeen.cred=true; effects.push({type:"PING",stat:"cred"}); }
-  return { state:{...s, cash:s.cash+revenue, inv, demand, pagerDeal, montage, storyFlags, hudSeen, streak, npcState,
+  return { state:{...s, ...tradeMarketPatch(s,drugIdx,amt,"sell"), cash:s.cash+revenue, inv, demand, pagerDeal, montage, storyFlags, hudSeen, streak, npcState,
     cred:CL(s.cred+credGain,0,100), totalProfit:(s.totalProfit||0)+Math.max(0,profit),
     totalDeals:(s.totalDeals||0)+1, dealsSinceStory:(s.dealsSinceStory||0)+1,
     biggestDeal:Math.max(s.biggestDeal||0,revenue),
@@ -1493,6 +2564,480 @@ const SFX={
   error:()=>tone(160,.15,"sawtooth",.06),
   type:()=>tone(1200+Math.random()*400,.015,"square",.018),
 };
+// ═══════════════════════════════════════════════════════════════
+// NEON NOIR AUDIO ENGINE v2 — everything synthesized, zero assets
+// ═══════════════════════════════════════════════════════════════
+// Bus layout (built lazily, once, on the first sound after a gesture):
+//
+//   one-shot voices ──> sfxBus ──┬─────────────────────────────┐
+//                                └─> sfxSend ─> convolver ─┐   │
+//   music voices ─> mFilt ─> mLvl ─> mDuck ──┬─────────────┼──>│─> master ─> limiter ─> out
+//                   (tension sweep)          └─> mSend ────┘   │
+//
+// The convolver runs a procedurally generated impulse response (no files).
+// Every one-shot node disconnects itself in onended, so nothing ever leaks.
+
+const mtof=m=>440*Math.pow(2,(m-69)/12);
+
+const AUDIO=(()=>{
+  let G=null, muted=false, hidden=false;
+
+  const mkNoise=a=>{
+    const n=Math.floor(a.sampleRate*2), b=a.createBuffer(1,n,a.sampleRate), d=b.getChannelData(0);
+    for(let i=0;i<n;i++) d[i]=Math.random()*2-1;
+    return b;
+  };
+  // Procedural impulse response: a few early reflections + exponential tail.
+  const mkIR=(a,sec,decay)=>{
+    const n=Math.max(8,Math.floor(a.sampleRate*sec)), b=a.createBuffer(2,n,a.sampleRate);
+    for(let c=0;c<2;c++){
+      const d=b.getChannelData(c);
+      for(let i=0;i<n;i++){ const t=i/n; d[i]=(Math.random()*2-1)*Math.pow(1-t,decay)*(1-t*0.12); }
+      d[Math.floor(n*0.011)]+=c?0.50:-0.55;
+      d[Math.floor(n*0.026)]+=c?-0.38:0.34;
+      d[Math.floor(n*0.049)]+=c?0.22:0.25;
+    }
+    return b;
+  };
+
+  const g=()=>{
+    const a=ctx(); if(!a) return null;
+    if(G&&G.a===a) return G;
+    const master=a.createGain(); master.gain.value=muted?0.0001:0.85;
+    const lim=a.createDynamicsCompressor();
+    lim.threshold.value=-9; lim.knee.value=14; lim.ratio.value=9;
+    lim.attack.value=0.004; lim.release.value=0.2;
+    master.connect(lim); lim.connect(a.destination);
+
+    const verb=a.createConvolver(); verb.normalize=true; verb.buffer=mkIR(a,2.6,2.4);
+    const verbLvl=a.createGain(); verbLvl.gain.value=0.9;
+    verb.connect(verbLvl); verbLvl.connect(master);
+
+    const sfx=a.createGain(); sfx.gain.value=0.85;
+    const sfxSend=a.createGain(); sfxSend.gain.value=0.18;
+    sfx.connect(master); sfx.connect(sfxSend); sfxSend.connect(verb);
+
+    const mFilt=a.createBiquadFilter(); mFilt.type="lowpass"; mFilt.frequency.value=3600; mFilt.Q.value=0.8;
+    const mLvl=a.createGain(); mLvl.gain.value=0.0001;
+    const mDuck=a.createGain(); mDuck.gain.value=1;
+    const mSend=a.createGain(); mSend.gain.value=0.30;
+    mFilt.connect(mLvl); mLvl.connect(mDuck); mDuck.connect(master);
+    mDuck.connect(mSend); mSend.connect(verb);
+
+    G={a,master,lim,verb,verbLvl,sfx,sfxSend,mFilt,mLvl,mDuck,mSend,noise:mkNoise(a)};
+    return G;
+  };
+
+  const now=()=>{ const b=g(); return b?b.a.currentTime:0; };
+  const dead=(...n)=>{ n.forEach(x=>{ try{ x.disconnect(); }catch(e){} }); };
+
+  // ── primitive voices ─────────────────────────────────────────
+  const osc=(type,freq,when,dur,peak,dest,detune,slideTo)=>{
+    const b=g(); if(!b) return null;
+    const a=b.a, o=a.createOscillator(), gn=a.createGain();
+    o.type=type; o.frequency.setValueAtTime(Math.max(20,freq),when);
+    if(slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20,slideTo),when+dur);
+    if(detune) o.detune.setValueAtTime(detune,when);
+    gn.gain.setValueAtTime(0.0001,when);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,peak),when+0.008);
+    gn.gain.exponentialRampToValueAtTime(0.0001,when+dur);
+    o.connect(gn); gn.connect(dest||b.sfx);
+    o.start(when); o.stop(when+dur+0.03);
+    o.onended=()=>dead(o,gn);
+    return o;
+  };
+  const noise=(when,dur,peak,type,freq,Q,dest,sweepTo)=>{
+    const b=g(); if(!b) return null;
+    const a=b.a, s=a.createBufferSource(); s.buffer=b.noise; s.loop=true;
+    s.playbackRate.value=0.85+Math.random()*0.4;
+    const f=a.createBiquadFilter(); f.type=type||"bandpass"; f.Q.value=Q||1;
+    f.frequency.setValueAtTime(Math.max(30,freq),when);
+    if(sweepTo) f.frequency.exponentialRampToValueAtTime(Math.max(30,sweepTo),when+dur);
+    const gn=a.createGain();
+    gn.gain.setValueAtTime(0.0001,when);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,peak),when+0.005);
+    gn.gain.exponentialRampToValueAtTime(0.0001,when+dur);
+    s.connect(f); f.connect(gn); gn.connect(dest||b.sfx);
+    s.start(when,Math.random()*1.2); s.stop(when+dur+0.03);
+    s.onended=()=>dead(s,f,gn);
+    return s;
+  };
+  // plucked/filtered synth note — the workhorse for arps, stabs and SFX melody
+  const pluck=(when,freq,dur,peak,type,dest,cutMul)=>{
+    const b=g(); if(!b) return;
+    const a=b.a, o=a.createOscillator(), f=a.createBiquadFilter(), gn=a.createGain();
+    o.type=type||"square"; o.frequency.setValueAtTime(Math.max(20,freq),when);
+    f.type="lowpass"; f.Q.value=4;
+    f.frequency.setValueAtTime(Math.min(12000,freq*(cutMul||9)+200),when);
+    f.frequency.exponentialRampToValueAtTime(Math.max(160,freq*1.5),when+dur);
+    gn.gain.setValueAtTime(0.0001,when);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,peak),when+0.006);
+    gn.gain.exponentialRampToValueAtTime(0.0001,when+dur);
+    o.connect(f); f.connect(gn); gn.connect(dest||b.sfx);
+    o.start(when); o.stop(when+dur+0.03);
+    o.onended=()=>dead(o,f,gn);
+  };
+  // fat detuned bass with its own filter envelope + clean sub
+  const bass=(when,freq,dur,peak,dest,bright)=>{
+    const b=g(); if(!b) return;
+    const a=b.a, o1=a.createOscillator(), o2=a.createOscillator(), sub=a.createOscillator();
+    const f=a.createBiquadFilter(), gn=a.createGain();
+    o1.type="sawtooth"; o2.type="sawtooth"; sub.type="sine";
+    o1.frequency.setValueAtTime(freq,when);
+    o2.frequency.setValueAtTime(freq,when); o2.detune.setValueAtTime(-12,when);
+    sub.frequency.setValueAtTime(freq/2,when);
+    f.type="lowpass"; f.Q.value=7;
+    f.frequency.setValueAtTime(Math.min(7000,freq*(bright||7)+140),when);
+    f.frequency.exponentialRampToValueAtTime(Math.max(100,freq*1.7),when+Math.min(0.32,dur));
+    gn.gain.setValueAtTime(0.0001,when);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,peak),when+0.012);
+    gn.gain.setValueAtTime(Math.max(0.0002,peak),when+Math.max(0.03,dur*0.55));
+    gn.gain.exponentialRampToValueAtTime(0.0001,when+dur);
+    o1.connect(f); o2.connect(f); f.connect(gn);
+    const sg=a.createGain(); sg.gain.value=0.85; sub.connect(sg); sg.connect(gn);
+    gn.connect(dest||b.sfx);
+    o1.start(when); o2.start(when); sub.start(when);
+    o1.stop(when+dur+0.05); o2.stop(when+dur+0.05); sub.stop(when+dur+0.05);
+    sub.onended=()=>dead(o1,o2,sub,sg,f,gn);
+  };
+  // inharmonic bell — used for coins, chimes, achievements
+  const bell=(when,freq,dur,peak,dest)=>{
+    osc("sine",freq,when,dur,peak,dest);
+    osc("sine",freq*2.76,when,dur*0.55,peak*0.32,dest);
+    osc("sine",freq*5.40,when,dur*0.30,peak*0.14,dest);
+  };
+
+  // ── drum kit ─────────────────────────────────────────────────
+  const DRUM={
+    kick(when,vel,dest){
+      const b=g(); if(!b) return; const a=b.a;
+      const o=a.createOscillator(), gn=a.createGain();
+      o.type="sine";
+      o.frequency.setValueAtTime(150,when);
+      o.frequency.exponentialRampToValueAtTime(44,when+0.09);
+      gn.gain.setValueAtTime(0.0001,when);
+      gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,vel),when+0.006);
+      gn.gain.exponentialRampToValueAtTime(0.0001,when+0.30);
+      o.connect(gn); gn.connect(dest||b.sfx);
+      o.start(when); o.stop(when+0.34);
+      o.onended=()=>dead(o,gn);
+      noise(when,0.018,vel*0.30,"highpass",2400,0.7,dest);
+    },
+    snare(when,vel,dest){
+      const b=g(); if(!b) return; const a=b.a;
+      noise(when,0.15,vel*0.85,"bandpass",1750,0.9,dest);
+      noise(when,0.05,vel*0.45,"highpass",4400,0.7,dest);
+      const o=a.createOscillator(), gn=a.createGain();
+      o.type="triangle";
+      o.frequency.setValueAtTime(198,when);
+      o.frequency.exponentialRampToValueAtTime(148,when+0.09);
+      gn.gain.setValueAtTime(0.0001,when);
+      gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,vel*0.5),when+0.005);
+      gn.gain.exponentialRampToValueAtTime(0.0001,when+0.13);
+      o.connect(gn); gn.connect(dest||b.sfx);
+      o.start(when); o.stop(when+0.17);
+      o.onended=()=>dead(o,gn);
+    },
+    hat(when,vel,open,dest){ noise(when,open?0.20:0.035,vel,"highpass",open?6600:8400,0.6,dest); },
+    tom(when,freq,vel,dest){
+      const b=g(); if(!b) return; const a=b.a;
+      const o=a.createOscillator(), gn=a.createGain();
+      o.type="sine";
+      o.frequency.setValueAtTime(freq,when);
+      o.frequency.exponentialRampToValueAtTime(Math.max(40,freq*0.55),when+0.28);
+      gn.gain.setValueAtTime(0.0001,when);
+      gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,vel),when+0.008);
+      gn.gain.exponentialRampToValueAtTime(0.0001,when+0.34);
+      o.connect(gn); gn.connect(dest||b.sfx);
+      o.start(when); o.stop(when+0.38);
+      o.onended=()=>dead(o,gn);
+      noise(when,0.05,vel*0.25,"bandpass",freq*3,1.4,dest);
+    },
+    clap(when,vel,dest){ for(let i=0;i<3;i++) noise(when+i*0.013,0.085+i*0.035,vel*(1-i*0.22),"bandpass",1150+i*200,1.6,dest); },
+    rim(when,vel,dest){ noise(when,0.028,vel,"bandpass",2700,4,dest); },
+    crash(when,vel,dest){ noise(when,1.35,vel,"highpass",5200,0.5,dest); noise(when,0.9,vel*0.6,"bandpass",9000,0.4,dest); },
+  };
+
+  return {
+    g, now, osc, noise, pluck, bass, bell, DRUM, dead,
+    // peek() never calls ctx(), so the scheduler cannot accidentally
+    // resume a context we deliberately suspended when the tab went away.
+    peek:()=>G,
+    isMuted:()=>muted,
+    // Mute is a gain ramp, not a teardown — the transport keeps its phase.
+    setMuted(m){
+      muted=!!m; const b=G;
+      if(!b) return;
+      const t=b.a.currentTime;
+      b.master.gain.cancelScheduledValues(t);
+      b.master.gain.setValueAtTime(Math.max(0.0001,b.master.gain.value),t);
+      b.master.gain.exponentialRampToValueAtTime(muted?0.0001:0.85,t+0.25);
+    },
+    // Tab hidden -> suspend the whole context (stops all CPU + scheduling drift).
+    setHidden(h){
+      hidden=!!h; const a=AC; if(!a) return;
+      try{ if(hidden) a.suspend(); else if(!muted) a.resume(); }catch(e){}
+    },
+    // Call from a real user gesture. Safe to call many times.
+    unlock(){
+      const b=g(); if(!b) return;
+      try{ if(b.a.state!=="running") b.a.resume(); }catch(e){}
+    },
+  };
+})();
+
+// ═══════════════════════════════════════════════════════════════
+// ADAPTIVE SYNTHWAVE SOUNDTRACK
+// ═══════════════════════════════════════════════════════════════
+// Lookahead scheduler (25ms timer, 120ms horizon) => sample-accurate,
+// seamless looping. Mood is re-read from the game every bar, so heat /
+// era / night / district changes glide in without restarting anything.
+
+const MUSIC=(()=>{
+  // [root midi, chord intervals] x 4 bars, one progression per era
+  const PROGS=[
+    [[45,[0,3,7,10]],[41,[0,4,7,11]],[48,[0,4,7,11]],[43,[0,4,7,9]]],   // Paradise  — Am7 Fmaj7 Cmaj7 G6
+    [[38,[0,3,7,10]],[46,[0,4,7,11]],[43,[0,4,7,10]],[45,[0,4,7,10]]],  // Anti-Drug — Dm7 Bb^7 G7 A7
+    [[36,[0,3,7,10]],[44,[0,4,7,11]],[39,[0,4,7,11]],[46,[0,4,7,10]]],  // Crack     — Cm7 Ab^7 Eb^7 Bb7
+    [[42,[0,3,7,10]],[38,[0,4,7,9]],[37,[0,3,7,10]],[44,[0,4,7,10]]],   // War       — F#m7 D6 C#m7 Ab7
+    [[40,[0,3,7,10]],[36,[0,3,6,10]],[44,[0,4,7,10]],[35,[0,3,7,11]]],  // Endgame   — Em7 Cdim Ab7 Bm^7
+  ];
+  // 16-step patterns, indexed by intensity 0..3
+  const KICKS=[
+    [1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0],
+    [1,0,0,0, 0,0,1,0, 1,0,0,0, 0,0,1,0],
+    [1,0,0,1, 0,0,1,0, 1,0,0,1, 0,0,1,0],
+    [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,1],
+  ];
+  const SNARES=[
+    [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0],
+    [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
+    [0,0,0,0, 1,0,0,0, 0,0,1,0, 1,0,0,0],
+    [0,0,0,0, 1,0,0,1, 0,0,0,0, 1,0,1,0],
+  ];
+  const HATS=[
+    [0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0],
+    [0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,1],
+    [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0],
+    [1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1],
+  ];
+  // bass rhythm: index into chord tones, -1 = rest
+  const BASSES=[
+    [0,-1,-1,-1, -1,-1,-1,-1, 0,-1,-1,-1, -1,-1,-1,-1],
+    [0,-1,-1,0, -1,-1,2,-1, 0,-1,-1,0, -1,-1,1,-1],
+    [0,-1,0,-1, 2,-1,0,-1, 0,-1,0,-1, 3,-1,2,-1],
+    [0,0,-1,0, 2,0,-1,0, 0,0,-1,3, 2,0,3,2],
+  ];
+  // per-district accent: which step it lands on, semitone offset, waveform
+  const DISTRICT=[
+    {step:6, off:24, wave:"triangle", gain:0.030},  // Miami Beach   — glitter
+    {step:10,off:12, wave:"square",   gain:0.026},  // Little Havana — clave stab
+    {step:5, off:-12,wave:"sawtooth", gain:0.032},  // Overtown      — low menace
+    {step:14,off:19, wave:"sine",     gain:0.028},  // Coral Gables  — soft chime
+    {step:3, off:19, wave:"square",   gain:0.022},  // Ft Lauderdale — party blip
+    {step:12,off:7,  wave:"sine",     gain:0.030},  // The Keys      — tide swell
+  ];
+
+  const DRUM=AUDIO.DRUM, bass=AUDIO.bass;
+  let T=null;                       // transport, null when stopped
+  const LOOK=0.12, TICK=25;
+
+  const readMood=()=>{
+    let m={};
+    try{ m=(T&&T.getMood?T.getMood():null)||{}; }catch(e){ m={}; }
+    const era=Math.max(0,Math.min(PROGS.length-1,m.era||0));
+    const heat=Math.max(0,Math.min(100,m.heat||0));
+    const move=m.move||0;
+    const title=m.scene==="title";
+    let lvl=title?0:heat>=70?3:heat>=45?2:heat>=20?1:0;
+    if(!title&&era>=3) lvl=Math.min(3,lvl+1);
+    if(!title&&m.move!=null&&move<6) lvl=Math.min(lvl,1);   // calm opening minutes
+    if(!title&&m.deals!=null&&m.deals===0) lvl=0;
+    return {
+      era, heat, lvl, title,
+      loc:Math.max(0,Math.min(DISTRICT.length-1,m.loc||0)),
+      night:title?true:!!m.night,
+      bpm:title?76:(90+heat*0.26+era*2.5+(m.night?-6:2)),
+    };
+  };
+
+  const stepDur=()=>60/Math.max(50,T?T.bpm:96)/4;
+
+  const setTension=(b,mood)=>{
+    const t=b.a.currentTime;
+    // Tension closes the room down: bright and open when clean, choked when hunted.
+    const cut=mood.title?1500:5200-(mood.heat/100)*3500-(mood.night?500:0);
+    b.mFilt.frequency.setTargetAtTime(Math.max(600,cut),t,0.7);
+    b.mFilt.Q.setTargetAtTime(0.8+(mood.heat/100)*3.2,t,0.7);
+    b.mSend.gain.setTargetAtTime(mood.night?0.42:0.26,t,0.9);
+  };
+
+  const schedule=(b,step,t,mood)=>{
+    const bar=Math.floor(step/16)%4, i=step%16;
+    const prog=PROGS[mood.era], ch=prog[bar];
+    const root=ch[0], tones=ch[1];
+    const L=mood.lvl;
+    const swing=(i%2===1)?stepDur()*(mood.night?0.10:0.06):0;
+    const t2=t+swing;
+
+    // ── drums ──
+    if(!mood.title||i===0){
+      if(KICKS[L][i]) DRUM.kick(t,mood.title?0.28:0.60-(i?0.12:0),b.mFilt);
+    }
+    if(!mood.title){
+      if(SNARES[L][i]) (L>=2?DRUM.clap:DRUM.snare)(t2,0.30,b.mFilt);
+      if(HATS[L][i]) DRUM.hat(t2,L>=3&&i===14?0.10:0.055,L>=3&&i===14,b.mFilt);
+      if(L>=2&&i===15) DRUM.rim(t2,0.07,b.mFilt);
+      if(L>=3&&i===8) DRUM.tom(t,mtof(root+12),0.16,b.mFilt);
+    }
+
+    // ── bass ──
+    const bi=BASSES[L][i];
+    if(bi>=0&&!mood.title){
+      const n=root+tones[Math.min(bi,tones.length-1)];
+      bass(t,mtof(n),stepDur()*(L>=2?1.5:2.6),0.17+L*0.012,b.mFilt,5+L*1.5);
+    }else if(mood.title&&i===0){
+      bass(t,mtof(root),stepDur()*12,0.13,b.mFilt,3.5);
+    }
+
+    // ── pad chord change on the downbeat ──
+    if(i===0) voicePad(b,root,tones,mood);
+
+    // ── arpeggio ──
+    if(L>=1&&!mood.title&&(i%2===(mood.night?1:0))){
+      const idx=(step>>1)%(tones.length+1);
+      const n=root+24+tones[idx%tones.length]+(idx>=tones.length?12:0);
+      pluckMusic(b,t2,mtof(n),stepDur()*1.6,0.030+L*0.006,mood.night?"triangle":"square");
+    }
+    // ── lead motif every other bar once things get real ──
+    if(L>=2&&i===0&&bar%2===1){
+      const seq=[0,7,10,12,10,7];
+      seq.forEach((s,k)=>pluckMusic(b,t+k*stepDur()*2,mtof(root+24+s),stepDur()*2.4,0.034,"sawtooth"));
+    }
+    // ── district accent ──
+    const d=DISTRICT[mood.loc];
+    if(!mood.title&&d&&i===d.step) pluckMusic(b,t2,mtof(root+d.off),stepDur()*2.2,d.gain,d.wave);
+    // ── heat siren shadow ──
+    if(L>=3&&i===12){
+      AUDIO.osc("sawtooth",mtof(root+27),t,stepDur()*3,0.022,b.mFilt,0,mtof(root+20));
+    }
+  };
+
+  const pluckMusic=(b,t,f,dur,peak,wave)=>AUDIO.pluck(t,f,dur,peak,wave,b.mFilt,7);
+
+  // Persistent pad: 4 detuned saws + slow filter LFO. Retuned, never rebuilt.
+  const buildPad=(b)=>{
+    const a=b.a;
+    const padFilt=a.createBiquadFilter(); padFilt.type="lowpass"; padFilt.frequency.value=1200; padFilt.Q.value=1.2;
+    const padGain=a.createGain(); padGain.gain.value=0.0001;
+    padFilt.connect(padGain); padGain.connect(b.mFilt);
+    const lfo=a.createOscillator(); lfo.type="sine"; lfo.frequency.value=0.07;
+    const lfoAmt=a.createGain(); lfoAmt.gain.value=520;
+    lfo.connect(lfoAmt); lfoAmt.connect(padFilt.frequency);
+    const vox=[];
+    for(let i=0;i<4;i++){
+      const o=a.createOscillator();
+      o.type=i===3?"triangle":"sawtooth";
+      o.frequency.value=220;
+      o.detune.value=(i-1.5)*8;
+      const vg=a.createGain(); vg.gain.value=i===3?0.20:0.13;
+      o.connect(vg); vg.connect(padFilt);
+      vox.push({o,vg});
+    }
+    const t=a.currentTime;
+    vox.forEach(v=>v.o.start(t)); lfo.start(t);
+    padGain.gain.setValueAtTime(0.0001,t);
+    padGain.gain.exponentialRampToValueAtTime(0.20,t+2.2);
+    return {padFilt,padGain,lfo,lfoAmt,vox};
+  };
+  const voicePad=(b,root,tones,mood)=>{
+    if(!T||!T.pad) return;
+    const t=b.a.currentTime, oct=mood.night?0:12;
+    T.pad.vox.forEach((v,i)=>{
+      const n=root+oct+tones[i%tones.length]+(i===3?12:0);
+      v.o.frequency.setTargetAtTime(mtof(n),t,0.30);
+    });
+    T.pad.padFilt.frequency.setTargetAtTime(mood.night?820:1500+mood.lvl*260,t,1.2);
+    T.pad.padGain.gain.setTargetAtTime(mood.title?0.26:0.20-mood.lvl*0.025,t,1.5);
+  };
+
+  const tick=()=>{
+    const b=AUDIO.peek(); if(!b||!T) return;
+    const a=b.a;
+    if(a.state!=="running") return;               // suspended tab: hold position
+    if(T.next<a.currentTime-0.4) T.next=a.currentTime+0.06;   // recover from throttling
+    let guard=0;
+    while(T.next<a.currentTime+LOOK&&guard++<64){
+      if(T.step%16===0){                          // re-read the game once per bar
+        const m=readMood();
+        T.mood=m; T.bpm=m.bpm; setTension(b,m);
+      }
+      schedule(b,T.step,T.next,T.mood);
+      T.next+=stepDur();
+      T.step++;
+    }
+  };
+
+  return {
+    running:()=>!!T,
+    root:()=>{
+      if(!T||!T.mood) return 45;
+      const p=PROGS[T.mood.era||0];
+      return p[Math.floor(T.step/16)%4][0];
+    },
+    chord:()=>{
+      if(!T||!T.mood) return [0,3,7,10];
+      const p=PROGS[T.mood.era||0];
+      return p[Math.floor(T.step/16)%4][1];
+    },
+    start(getMood,owner){
+      const b=AUDIO.g(); if(!b) return;
+      if(T){ T.getMood=getMood||T.getMood; T.owner=owner; return; }   // idempotent
+      const a=b.a;
+      T={ owner, getMood, step:0, next:a.currentTime+0.08, bpm:96, mood:null, pad:null, timer:null };
+      T.mood=readMood(); T.bpm=T.mood.bpm;
+      T.pad=buildPad(b);
+      setTension(b,T.mood);
+      const t=a.currentTime;
+      b.mLvl.gain.cancelScheduledValues(t);
+      b.mLvl.gain.setValueAtTime(0.0001,t);
+      b.mLvl.gain.exponentialRampToValueAtTime(0.55,t+1.4);
+      b.mDuck.gain.cancelScheduledValues(t); b.mDuck.gain.setValueAtTime(1,t);
+      T.timer=setInterval(tick,TICK);
+      tick();
+    },
+    // owner guard: a screen only stops the music it started, so React's
+    // cleanup/setup ordering can never leave two transports fighting.
+    stop(owner){
+      if(!T) return;
+      if(owner!==undefined&&T.owner!==owner) return;
+      const b=AUDIO.g(), pad=T.pad;
+      clearInterval(T.timer); T=null;
+      if(!b) return;
+      const t=b.a.currentTime;
+      b.mLvl.gain.cancelScheduledValues(t);
+      b.mLvl.gain.setValueAtTime(Math.max(0.0001,b.mLvl.gain.value),t);
+      b.mLvl.gain.exponentialRampToValueAtTime(0.0001,t+0.4);
+      if(pad){
+        pad.padGain.gain.cancelScheduledValues(t);
+        pad.padGain.gain.setValueAtTime(Math.max(0.0001,pad.padGain.gain.value),t);
+        pad.padGain.gain.exponentialRampToValueAtTime(0.0001,t+0.4);
+        pad.vox.forEach(v=>{ try{ v.o.stop(t+0.5); }catch(e){} v.o.onended=()=>AUDIO.dead(v.o,v.vg); });
+        try{ pad.lfo.stop(t+0.5); }catch(e){}
+        pad.lfo.onended=()=>AUDIO.dead(pad.lfo,pad.lfoAmt,pad.padFilt,pad.padGain);
+      }
+    },
+    // sidechain the bed under a loud SFX so dialogue/sales cut through
+    duck(amount,dur){
+      const b=AUDIO.g(); if(!b) return;
+      const t=b.a.currentTime, d=dur||0.6;
+      b.mDuck.gain.cancelScheduledValues(t);
+      b.mDuck.gain.setValueAtTime(b.mDuck.gain.value,t);
+      b.mDuck.gain.linearRampToValueAtTime(Math.max(0.05,1-(amount||0.4)),t+0.04);
+      b.mDuck.gain.linearRampToValueAtTime(1,t+d);
+    },
+  };
+})();
 // Tiny era-aware synth loop
 const SCALES=[[261,329,392,523],[246,311,392,466],[233,311,349,466],[220,277,349,440],[207,261,311,415]];
 class SynthLoop{
@@ -1526,6 +3071,151 @@ class SynthLoop{
 // ═══════════════════════════════════════════════════════════════
 // VIEW LAYER — styles, juice, portraits, scenes  (React/DOM only)
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// SFX v2 — musical one-shots, keyed to whatever chord the bed is on
+// ═══════════════════════════════════════════════════════════════
+// Every cue is built from the AUDIO primitives, lands on a chord tone of
+// the running soundtrack, and ducks the bed instead of fighting it.
+// SFX keeps its original keys so every existing { type:"SFX", name } effect
+// and every SFX.foo() call site keeps working untouched.
+
+const sfxKey=()=>MUSIC.root();
+const sfxNote=semi=>mtof(sfxKey()+semi);
+
+Object.assign(SFX,{
+  click(){ const t=AUDIO.now()+0.001;
+    AUDIO.noise(t,0.018,0.050,"bandpass",2600,2.2);
+    AUDIO.osc("sine",sfxNote(24),t,0.050,0.030);
+  },
+  type(){ const t=AUDIO.now()+0.001;
+    AUDIO.noise(t,0.012,0.020,"highpass",5200+Math.random()*1800,0.8);
+  },
+  error(){ const t=AUDIO.now()+0.001;
+    AUDIO.pluck(t,sfxNote(-11),0.22,0.085,"sawtooth",null,1.8);
+    AUDIO.pluck(t+0.006,sfxNote(-12),0.24,0.080,"sawtooth",null,1.6);
+    AUDIO.DRUM.rim(t,0.045);
+  },
+  buy(){ const t=AUDIO.now()+0.001;
+    AUDIO.pluck(t,sfxNote(19),0.14,0.075,"triangle",null,6);
+    AUDIO.pluck(t+0.070,sfxNote(12),0.20,0.070,"triangle",null,5);
+    AUDIO.noise(t,0.090,0.030,"bandpass",900,1.2,null,2600);
+    AUDIO.DRUM.kick(t,0.22);
+    MUSIC.duck(0.22,0.35);
+  },
+  sell(){ const t=AUDIO.now()+0.001;
+    AUDIO.pluck(t,sfxNote(12),0.13,0.075,"square",null,8);
+    AUDIO.pluck(t+0.075,sfxNote(19),0.22,0.080,"square",null,9);
+    AUDIO.bell(t+0.075,sfxNote(31),0.50,0.030);
+    AUDIO.DRUM.hat(t,0.050,false);
+    MUSIC.duck(0.25,0.45);
+  },
+  sellBig(){ const t=AUDIO.now()+0.001, c=MUSIC.chord();
+    [0,c[1],c[2],12].forEach((s,i)=>AUDIO.pluck(t+i*0.065,sfxNote(24+s),0.28,0.075,"square",null,9));
+    AUDIO.DRUM.kick(t,0.42); AUDIO.DRUM.hat(t+0.13,0.050,false);
+    AUDIO.bell(t+0.26,sfxNote(36),0.70,0.030);
+    MUSIC.duck(0.35,0.70);
+  },
+  sellHuge(){ const t=AUDIO.now()+0.001, c=MUSIC.chord();
+    [0,c[1],c[2],12,12+c[1]].forEach((s,i)=>AUDIO.pluck(t+i*0.062,sfxNote(24+s),0.30,0.080,"sawtooth",null,8));
+    AUDIO.DRUM.kick(t,0.50); AUDIO.DRUM.clap(t+0.31,0.26);
+    AUDIO.bell(t+0.33,sfxNote(43),1.00,0.036);
+    AUDIO.noise(t+0.30,0.90,0.045,"highpass",5400,0.5);
+    MUSIC.duck(0.50,1.10);
+  },
+  sellMassive(){ const t=AUDIO.now()+0.001, c=MUSIC.chord();
+    [0,c[1],c[2],12,12+c[1],12+c[2],24].forEach((s,i)=>
+      AUDIO.pluck(t+i*0.058,sfxNote(24+s),0.34,0.085,"sawtooth",null,9));
+    AUDIO.DRUM.kick(t,0.62); AUDIO.DRUM.kick(t+0.40,0.48);
+    AUDIO.DRUM.tom(t+0.20,sfxNote(-5),0.24); AUDIO.DRUM.tom(t+0.30,sfxNote(-12),0.24);
+    AUDIO.DRUM.crash(t+0.41,0.10);
+    [0,c[1],c[2],12].forEach(s=>AUDIO.osc("sawtooth",sfxNote(12+s),t+0.41,1.50,0.042,null,Math.random()*10-5));
+    AUDIO.bell(t+0.44,sfxNote(48),1.60,0.040);
+    MUSIC.duck(0.65,1.80);
+  },
+  coin(){ const t=AUDIO.now()+0.001;
+    AUDIO.bell(t,sfxNote(31),0.35,0.045);
+    AUDIO.bell(t+0.055,sfxNote(38),0.50,0.036);
+  },
+  pager(){ const t=AUDIO.now()+0.001;
+    for(let i=0;i<3;i++) AUDIO.pluck(t+i*0.115,sfxNote(36),0.060,0.055,"square",null,3);
+    AUDIO.noise(t,0.020,0.020,"highpass",4000,1);
+  },
+  police(){ const t=AUDIO.now()+0.001;
+    for(let i=0;i<3;i++){ const a0=t+i*0.52;
+      AUDIO.osc("sawtooth",740,a0,0.26,0.050,null,0,660);
+      AUDIO.osc("sawtooth",988,a0+0.26,0.26,0.050,null,0,880);
+      AUDIO.osc("sine",55,a0,0.50,0.050);
+    }
+    AUDIO.noise(t,1.50,0.035,"bandpass",300,1.4,null,1800);
+    AUDIO.DRUM.kick(t,0.50);
+    MUSIC.duck(0.70,1.80);
+  },
+  travel(){ const t=AUDIO.now()+0.001;
+    AUDIO.noise(t,0.50,0.070,"bandpass",400,1.0,null,1800);
+    AUDIO.osc("sine",110,t,0.45,0.045,null,0,190);
+  },
+  // richer version used by the travel overlay (car / boat variants)
+  travelMove(car,boat){ const t=AUDIO.now()+0.001;
+    AUDIO.noise(t,0.85,0.130,"bandpass",boat?200:300,1.1,null,boat?1400:3000);
+    AUDIO.noise(t+0.30,0.60,0.055,"lowpass",boat?600:1600,0.8,null,300);
+    AUDIO.osc("sine",boat?70:120,t,0.70,0.060,null,0,car?300:180);
+    AUDIO.osc("triangle",boat?105:180,t+0.05,0.50,0.030,null,7,car?420:250);
+    if(car) AUDIO.DRUM.hat(t+0.42,0.050,true);
+    MUSIC.duck(0.30,0.90);
+  },
+  // a pager-lit dialogue sting: mallet chime over a low swell
+  storylet(){ const t=AUDIO.now()+0.001, c=MUSIC.chord();
+    AUDIO.bell(t,sfxNote(24),0.90,0.040);
+    AUDIO.bell(t+0.13,sfxNote(24+c[2]),1.30,0.032);
+    AUDIO.osc("sine",sfxNote(-12),t,1.60,0.045);
+    AUDIO.noise(t,0.50,0.018,"lowpass",700,0.7,null,240);
+    MUSIC.duck(0.45,1.60);
+  },
+  achievement(i){ const t=AUDIO.now()+0.001, up=((i||0)%3)*2;
+    [0,4,7,12,16].forEach((s,k)=>AUDIO.bell(t+k*0.085,sfxNote(24+up+s),0.90,0.042-k*0.004));
+    AUDIO.DRUM.kick(t,0.34); AUDIO.DRUM.crash(t,0.070);
+    AUDIO.noise(t+0.40,1.10,0.028,"highpass",6000,0.5);
+    MUSIC.duck(0.35,1.40);
+  },
+  // era takeover: 1.15s riser, then the impact
+  era(){ const t=AUDIO.now()+0.001, h=t+1.15;
+    AUDIO.noise(t,1.15,0.100,"bandpass",300,1.6,null,6500);
+    AUDIO.osc("sawtooth",sfxNote(-12),t,1.15,0.050,null,0,sfxNote(12));
+    AUDIO.osc("sawtooth",sfxNote(-12),t,1.15,0.040,null,9,sfxNote(11));
+    AUDIO.DRUM.kick(h,0.72); AUDIO.DRUM.crash(h,0.120);
+    AUDIO.DRUM.tom(h+0.12,sfxNote(-5),0.28); AUDIO.DRUM.tom(h+0.24,sfxNote(-12),0.28);
+    AUDIO.osc("sawtooth",sfxNote(0),h,2.00,0.048,null,-7);
+    AUDIO.osc("sawtooth",sfxNote(7),h,2.00,0.044,null,7);
+    MUSIC.duck(0.75,2.60);
+  },
+  // ~0.9s tension pulse; the police screen retriggers it on an interval
+  chaseBed(){ const t=AUDIO.now()+0.001;
+    AUDIO.osc("sine",55,t,0.85,0.055);
+    AUDIO.osc("sine",58.2,t,0.85,0.035);
+    AUDIO.DRUM.kick(t,0.34); AUDIO.DRUM.kick(t+0.42,0.22);
+    AUDIO.noise(t+0.10,0.45,0.022,"bandpass",900,2.4,null,2400);
+    AUDIO.osc("sawtooth",311,t+0.02,0.30,0.020,null,0,440);
+    AUDIO.osc("sawtooth",440,t+0.34,0.30,0.018,null,0,311);
+  },
+  endingWin(){ const t=AUDIO.now()+0.001;
+    [0,7,12,16,19,24].forEach((s,i)=>AUDIO.pluck(t+i*0.12,sfxNote(12+s),0.70,0.075,"sawtooth",null,9));
+    AUDIO.DRUM.kick(t,0.60); AUDIO.DRUM.crash(t+0.70,0.120);
+    [0,4,7,12].forEach(s=>AUDIO.osc("sawtooth",sfxNote(s),t+0.72,2.60,0.048,null,Math.random()*8-4));
+    AUDIO.bell(t+0.75,sfxNote(36),2.20,0.045);
+  },
+  endingLose(){ const t=AUDIO.now()+0.001;
+    AUDIO.DRUM.kick(t,0.70); AUDIO.DRUM.crash(t,0.100);
+    [0,3,6,11].forEach((s,i)=>AUDIO.osc("sawtooth",sfxNote(s-12),t+i*0.02,3.00,0.046,null,(i-1.5)*9));
+    AUDIO.noise(t,2.40,0.040,"lowpass",1400,0.8,null,180);
+    AUDIO.osc("sine",41,t,3.20,0.060);
+  },
+});
+
+// The existing React effect keeps calling new SynthLoop().start()/.stop().
+// Point that API at the new transport; `this` is the owner token so React's
+// cleanup/setup ordering can never leave two transports running.
+SynthLoop.prototype.start=function(getMood){ MUSIC.start(getMood,this); };
+SynthLoop.prototype.stop=function(){ MUSIC.stop(this); };
 const ft="'Courier New',monospace", fb="Georgia,'Times New Roman',serif";
 
 const KEYFRAMES=`
@@ -1577,6 +3267,28 @@ const KEYFRAMES=`
 @keyframes streakBorder{0%,100%{box-shadow:inset 0 0 26px #FF6B3550}50%{box-shadow:inset 0 0 64px #FF6B35a0}}
 @keyframes rainbowB{from{filter:hue-rotate(0deg)}to{filter:hue-rotate(360deg)}}
 @keyframes hudPulse{0%,100%{box-shadow:0 0 4px #FF173355}50%{box-shadow:0 0 18px #FF1733}}
+@keyframes skyDriftA{0%{transform:translateX(-16px)}100%{transform:translateX(16px)}}
+@keyframes skyDriftB{0%{transform:translateX(9px)}100%{transform:translateX(-9px)}}
+@keyframes fogRoll{0%{transform:translateX(-70px);opacity:.14}50%{opacity:.30}100%{transform:translateX(70px);opacity:.14}}
+@keyframes neonBuzz{0%,100%{opacity:1}40%{opacity:1}41%{opacity:.22}42%{opacity:.9}43%{opacity:.35}44%{opacity:1}76%{opacity:1}77%{opacity:.45}78%{opacity:1}}
+@keyframes neonBuzz2{0%,100%{opacity:.96}16%{opacity:.96}17%{opacity:.28}18%{opacity:.96}62%{opacity:.96}63%{opacity:.42}64%{opacity:.96}65%{opacity:.18}66%{opacity:.96}}
+@keyframes tubeGlow{0%,100%{opacity:.45}50%{opacity:1}}
+@keyframes beaconBlink{0%,100%{opacity:.12}7%{opacity:1}15%{opacity:.12}}
+@keyframes reflShimmer{0%{transform:translateX(-6px)}50%{transform:translateX(6px)}100%{transform:translateX(-6px)}}
+@keyframes reflBand{0%{transform:translateY(0)}100%{transform:translateY(7px)}}
+@keyframes crtRoll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(0,-33.3333%,0)}}
+@keyframes trackGlitch{0%{transform:translateY(-14vh);opacity:0}1%{opacity:.5}4%{opacity:.45}9%{transform:translateY(114vh);opacity:0}100%{transform:translateY(114vh);opacity:0}}
+@keyframes hazeWave{0%,100%{transform:translateY(0) scaleY(1);opacity:.45}50%{transform:translateY(-5px) scaleY(1.07);opacity:.9}}
+@keyframes strobeL{0%,100%{opacity:0}5%{opacity:.6}11%{opacity:0}19%{opacity:.4}25%{opacity:0}}
+@keyframes strobeR{0%,100%{opacity:0}55%{opacity:.6}61%{opacity:0}69%{opacity:.4}75%{opacity:0}}
+@keyframes aberrJit{0%,100%{transform:translateX(0)}50%{transform:translateX(1.3px)}}
+@keyframes bloomBreath{0%,100%{opacity:.45}50%{opacity:.85}}
+@keyframes logoBuzz{0%,100%{opacity:1}51%{opacity:1}52%{opacity:.22}53%{opacity:1}54%{opacity:.5}55%{opacity:1}87%{opacity:1}88%{opacity:.35}89%{opacity:1}}
+@keyframes logoHum{0%,100%{opacity:.55}50%{opacity:1}}
+@keyframes palmSway{0%,100%{transform:rotate(-1.8deg)}50%{transform:rotate(1.8deg)}}
+@keyframes washSweep{0%{transform:translateX(-130%) skewX(-14deg);opacity:0}12%{opacity:.9}60%{opacity:.5}100%{transform:translateX(250%) skewX(-14deg);opacity:0}}
+@keyframes washTint{0%{opacity:.55}100%{opacity:0}}
+@keyframes dotPulse{0%,100%{transform:scale(1);opacity:.85}50%{transform:scale(1.9);opacity:.18}}
 button:active{transform:scale(.95)}
 button{transition:transform .16s cubic-bezier(.34,1.56,.64,1), box-shadow .15s ease, filter .15s ease}
 *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
@@ -1636,6 +3348,64 @@ const Bar=({v,max=100,color,h=5})=>(
     <div style={{height:"100%",width:`${CL(v/max*100,0,100)}%`,background:color,borderRadius:h,transition:"width .4s ease",boxShadow:`0 0 6px ${color}`}}/>
   </div>
 );
+
+// ── Tier-coded drug glyph: hex plate, tier color, break-even halo ──
+const TIER_C=[C.green,C.orange,C.pink];
+const TIER_TAG=["ST","MID","WT"];
+const DrugGlyph=({d,owned=0,sel=false})=>{
+  const c=TIER_C[d.tier]||C.dim;
+  return(
+    <div style={{position:"relative",width:30,height:34,flexShrink:0}}>
+      <svg viewBox="0 0 30 34" style={{position:"absolute",inset:0,width:"100%",height:"100%",display:"block"}}>
+        <polygon points="15,1.4 28.7,9.2 28.7,24.8 15,32.6 1.3,24.8 1.3,9.2"
+          fill={`${c}16`} stroke={`${c}${sel?"ee":owned>0?"aa":"55"}`} strokeWidth={sel?1.6:1.1}/>
+        {owned>0&&<polygon points="15,3.8 26.3,10.3 26.3,23.7 15,30.2 3.7,23.7 3.7,10.3"
+          fill="none" stroke={C.gold} strokeWidth=".8"
+          style={{animation:"tubeGlow 2.6s ease-in-out infinite"}}/>}
+        <polygon points="15,1.4 28.7,9.2 15,17 1.3,9.2" fill="#FFFFFF" opacity=".05"/>
+      </svg>
+      <div style={{position:"absolute",left:0,right:0,top:4,textAlign:"center",fontSize:14,
+        lineHeight:1.15,filter:`drop-shadow(0 0 5px ${c}bb)`}}>{d.emoji}</div>
+      <div style={{position:"absolute",left:0,right:0,bottom:1.5,textAlign:"center",fontFamily:ft,
+        fontSize:6,letterSpacing:.5,fontWeight:"bold",color:c,opacity:.9}}>{TIER_TAG[d.tier]}</div>
+    </div>
+  );
+};
+
+// ── Price history sparkline: gradient area, trend color, break-even line ──
+let SPARK_UID=0;
+const SparkPro=({data,color=C.blue,avg=0,w=52,h=24})=>{
+  const uid=useRef(0);
+  if(!uid.current) uid.current=++SPARK_UID;
+  if(!data||data.length<2) return <div style={{width:w,height:h,flexShrink:0}}/>;
+  const mn=Math.min(...data), mx=Math.max(...data), rng=(mx-mn)||1;
+  const yOf=v=>h-3-(CL((v-mn)/rng,0,1))*(h-8);
+  const pts=data.map((v,i)=>[(i/(data.length-1))*w, yOf(v)]);
+  const line=pts.map(p=>`${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const area=`0,${h} ${line} ${w},${h}`;
+  const up=data[data.length-1]>=data[0];
+  const sc=up?C.green:C.pink;
+  const last=pts[pts.length-1];
+  const gid="spk"+uid.current;
+  const showAvg=avg>0&&avg>mn&&avg<mx;
+  return(
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} style={{display:"block",flexShrink:0}}>
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={sc} stopOpacity=".45"/>
+          <stop offset="100%" stopColor={sc} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <polygon points={area} fill={`url(#${gid})`}/>
+      <polyline points={line} fill="none" stroke={color} strokeWidth="3.2" opacity=".14" strokeLinejoin="round"/>
+      {showAvg&&<line x1="0" y1={yOf(avg)} x2={w} y2={yOf(avg)} stroke={C.gold} strokeWidth=".7" strokeDasharray="2 2" opacity=".75"/>}
+      <polyline points={line} fill="none" stroke={sc} strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round"/>
+      <circle cx={last[0]} cy={last[1]} r="2.6" fill={sc} opacity=".3"
+        style={{transformBox:"fill-box",transformOrigin:"center",animation:"dotPulse 2s ease-in-out infinite"}}/>
+      <circle cx={last[0]} cy={last[1]} r="1.7" fill={sc}/>
+    </svg>
+  );
+};
 
 // ── FLIP-style price tick: animate the diff with native WAAPI before paint ──
 const PriceCell=({value})=>{
@@ -2036,6 +3806,312 @@ const MiamiSky=memo(({move,heat,locColor,locIdx=0})=>{
 });
 
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// PARALLAX MIAMI — layered neon-noir skyline (drop-in for MiamiSky)
+//   layer 0 haze towers · 1 far block · 2 near block + windows
+//   3 rooftop neon + beacons · 4 district scenery · 5 wet-asphalt
+//   reflection · 6 headlights · 7 siren wash · 8 CRT glass
+// ═══════════════════════════════════════════════════════════════
+const HX2=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const MIX=(a,b,t)=>{const A=HX2(a),B=HX2(b),k=CL(t,0,1);
+  return "#"+[0,1,2].map(i=>Math.round(A[i]+(B[i]-A[i])*k).toString(16).padStart(2,"0")).join("");};
+
+// four-stop skies: 0 = high day, 1 = dusk, 2 = golden hour, 3 = deep night
+const SKY_RAMPS=[
+  ["#0A3C74","#2C74AE","#84BCD8","#F2B168"],
+  ["#170A3A","#4A1858","#A62C58","#F2653A"],
+  ["#2A1052","#7C2A64","#D6563C","#FFB53F"],
+  ["#03060E","#080E2C","#121844","#241C56"],
+];
+const skyRamp=(move,heat)=>{
+  const ph=((move%4)+4)%4, k=CL(heat/100,0,1), t=k*.66;
+  return { ph, night:ph===1||ph===3,
+    stops:SKY_RAMPS[ph].map((c,i)=>MIX(c, i<2?"#2C0509":"#C4181C", t*(i<2?.85:1))) };
+};
+
+// slowest parallax layer — hazy distance towers
+const BUILD0=[[4,22,26],[42,30,18],[74,18,30],[118,26,22],[156,34,17],[186,20,28],[228,28,20],[266,17,32],[314,26,19],[352,21,26],[388,30,22]];
+// rooftop signage, tuned to sit on BUILD1 roofs (base y = 124)
+const SKY_SIGNS=[
+  {x:70, y:56, w:22, h:8, c:C.pink,  d:5.5, dl:0},
+  {x:213,y:54, w:21, h:8, c:C.blue,  d:7.2, dl:1.1, alt:true},
+  {x:364,y:60, w:23, h:8, c:C.gold,  d:6.3, dl:2.4},
+  {x:142,y:63, w:26, h:7, c:C.green, d:8.1, dl:.6, alt:true},
+];
+
+const SkySign=({x,y,w,h,c,d,dl,alt})=>(
+  <g style={{animation:`${alt?"neonBuzz2":"neonBuzz"} ${d}s linear ${dl}s infinite`}}>
+    <rect x={x-4} y={y-4} width={w+8} height={h+8} rx="4" fill={c} opacity=".07"/>
+    <rect x={x-2} y={y-2} width={w+4} height={h+4} rx="3" fill={c} opacity=".14"/>
+    <rect x={x} y={y} width={w} height={h} rx="2" fill="#04080F" stroke={c} strokeWidth="1"/>
+    <rect x={x+2.4} y={y+h/2-.9} width={w*.26} height="1.8" rx=".9" fill={c}/>
+    <rect x={x+w*.38} y={y+h/2-.9} width={w*.22} height="1.8" rx=".9" fill="#FFFFFF" opacity=".85"/>
+    <rect x={x+w*.68} y={y+h/2-.9} width={w*.24} height="1.8" rx=".9" fill={c}/>
+    <rect x={x+w/2-.6} y={y+h} width="1.2" height="5" fill="#050B16"/>
+  </g>
+);
+
+const MiamiSkyDeluxe=memo(({move=0,heat=0,locColor=C.pink,locIdx=0,ht=146,plain=false})=>{
+  const S=skyRamp(move,heat);
+  const night=S.night, hot=CL(heat/100,0,1);
+  const siren=heat>60&&!plain;
+  const HZ=122;                                  // horizon / waterline
+  const orb = S.ph===0 ? {x:336,y:32,r:16,day:true}
+            : S.ph===2 ? {x:252,y:58,r:27,day:true}   // big retro sun sinking onto the roofline
+            : S.ph===1 ? {x:350,y:42,r:12,day:false}
+            :            {x:318,y:26,r:11,day:false};
+  const winWarm = night?"#FFD27A":"#FFC98A";
+  const winCool = night?"#8FE9FF":"#CFE6FF";
+  const nearFill = night?"#050A16":MIX("#1A0A24",S.stops[1],.28);
+  const midFill  = night?"#080F22":MIX("#22102E",S.stops[1],.42);
+  const farFill  = MIX(S.stops[1],S.stops[2],.45);
+  return(
+    <div style={{position:"relative",height:ht,overflow:"hidden",background:S.stops[0]}}>
+      <svg viewBox="0 0 420 146" preserveAspectRatio="xMidYMax slice"
+        style={{position:"absolute",inset:0,width:"100%",height:"100%",display:"block"}}>
+        <defs>
+          <linearGradient id="dxSky" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor={S.stops[0]}/>
+            <stop offset="38%"  stopColor={S.stops[1]}/>
+            <stop offset="72%"  stopColor={S.stops[2]}/>
+            <stop offset="100%" stopColor={S.stops[3]}/>
+          </linearGradient>
+          <radialGradient id="dxOrbG" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"   stopColor={orb.day?"#FFE9A8":"#EAF1FF"} stopOpacity=".55"/>
+            <stop offset="55%"  stopColor={orb.day?"#FF8A46":"#9EC8FF"} stopOpacity=".22"/>
+            <stop offset="100%" stopColor={orb.day?"#FF2D7B":"#5A7CC0"} stopOpacity="0"/>
+          </radialGradient>
+          <linearGradient id="dxSunF" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor="#FFE27A"/>
+            <stop offset="48%"  stopColor="#FF8A3C"/>
+            <stop offset="100%" stopColor="#FF2D7B"/>
+          </linearGradient>
+          <clipPath id="dxSlat">
+            <rect x="-40" y="-40" width="80" height="46"/>
+            <rect x="-40" y="9"   width="80" height="7"/>
+            <rect x="-40" y="19"  width="80" height="5"/>
+            <rect x="-40" y="27"  width="80" height="3.4"/>
+            <rect x="-40" y="33"  width="80" height="2.2"/>
+          </clipPath>
+          <linearGradient id="dxWaterF" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor={night?"#0A1C34":"#123255"} stopOpacity=".95"/>
+            <stop offset="100%" stopColor={night?"#01060E":"#050D1A"} stopOpacity="1"/>
+          </linearGradient>
+          <radialGradient id="dxOrbRef" cx="50%" cy="0%" r="88%">
+            <stop offset="0%"   stopColor={orb.day?"#FFC069":"#DCEAFF"} stopOpacity=".62"/>
+            <stop offset="52%"  stopColor={orb.day?"#FF7A46":"#8FB4F0"} stopOpacity=".24"/>
+            <stop offset="100%" stopColor={orb.day?"#FF2D7B":"#4C6EB0"} stopOpacity="0"/>
+          </radialGradient>
+        </defs>
+
+        {/* ── sky ── */}
+        <rect x="0" y="0" width="420" height="146" fill="url(#dxSky)"/>
+
+        {/* ── stars (night) ── */}
+        {night&&<g style={{animation:"skyDriftB 46s ease-in-out infinite alternate"}}>
+          {[24,58,96,132,168,204,240,272,308,344,380,404,44,148,286].map((x,i)=>(
+            <circle key={i} cx={x} cy={8+((i*29)%52)} r={i%4===0?1.3:.75} fill="#FFFFFF"
+              style={{animation:`twinkle ${2+(i%5)*.6}s ease-in-out ${i*.31}s infinite`}}/>))}
+        </g>}
+
+        {/* ── sun / moon + halo ── */}
+        <g transform={`translate(${orb.x},${orb.y})`}>
+          <circle r={orb.r*3.6} fill="url(#dxOrbG)"/>
+          {orb.day?(
+            <g style={{animation:"sunPulse 5s ease-in-out infinite"}}>
+              <circle r={orb.r} fill="url(#dxSunF)" clipPath="url(#dxSlat)"/>
+            </g>
+          ):(<>
+            <circle r={orb.r} fill="#EDF1F8" opacity=".93"/>
+            <circle cx={-orb.r*.36} cy={-orb.r*.3} r={orb.r*.86} fill={S.stops[0]} opacity=".84"/>
+          </>)}
+        </g>
+
+        {/* ── drifting cloud / fog bands ── */}
+        <g style={{animation:"skyDriftA 54s ease-in-out infinite alternate"}} opacity={night?".26":".5"}>
+          <ellipse cx="84"  cy="30" rx="34" ry="6"   fill={MIX(S.stops[2],"#FFFFFF",.35)} opacity=".4"/>
+          <ellipse cx="118" cy="25" rx="20" ry="4.2" fill={MIX(S.stops[2],"#FFFFFF",.5)}  opacity=".33"/>
+          <ellipse cx="248" cy="42" rx="40" ry="6.5" fill={MIX(S.stops[2],"#FFFFFF",.28)} opacity=".3"/>
+          <ellipse cx="196" cy="18" rx="26" ry="4"   fill={MIX(S.stops[1],"#FFFFFF",.42)} opacity=".22"/>
+        </g>
+
+        {/* ── layer 0: haze towers ── */}
+        <g fill={farFill} opacity=".55" style={{animation:"skyDriftB 70s ease-in-out infinite alternate"}}>
+          {BUILD0.map(([x,bh,bw],i)=><rect key={i} x={x} y={118-bh} width={bw} height={bh}/>)}
+        </g>
+
+        {/* ── ground haze between layers ── */}
+        <rect x="0" y="88" width="420" height="34" fill={MIX(S.stops[2],S.stops[3],.4)} opacity={night?".22":".38"}/>
+
+        {/* ── layer 1: mid block ── */}
+        <g fill={midFill} style={{animation:"skyDriftB 38s ease-in-out infinite alternate"}}>
+          {BUILD2.map(([x,bh,bw],i)=><rect key={i} x={x} y={120-bh} width={bw} height={bh}/>)}
+          {BUILD2.map(([x,bh,bw],i)=><rect key={"t"+i} x={x} y={120-bh} width={bw} height="1.2" fill={locColor} opacity=".22"/>)}
+        </g>
+
+        {/* ── layer 2: near block + lit windows ── */}
+        <g>
+          {BUILD1.map(([x,bh,bw],i)=>(<g key={i}>
+            <rect x={x} y={124-bh} width={bw} height={bh} fill={nearFill}/>
+            <rect x={x} y={124-bh} width={bw} height="1.4" fill={locColor} opacity=".55"/>
+            <rect x={x} y={124-bh} width="1" height={bh} fill={locColor} opacity=".16"/>
+            {Array.from({length:Math.floor(bh/9)}).map((_,r)=>
+              Array.from({length:Math.floor(bw/9)}).map((_,c)=>{
+                const seed=(i*7+r*3+c*5+move);
+                const lit=(seed%(night?3:6))===0;
+                if(!lit) return null;
+                const cool=(seed%7)===0;
+                return <rect key={r+"-"+c} x={x+3+c*9} y={128-bh+r*9} width="3.4" height="4"
+                  fill={cool?winCool:winWarm} opacity={night?.95:.45}/>;
+              }))}
+          </g>))}
+        </g>
+
+        {/* ── layer 3: rooftop neon, antenna, beacon ── */}
+        {SKY_SIGNS.map((s,i)=><SkySign key={i} {...s}/>)}
+        <line x1="223" y1="64" x2="223" y2="46" stroke="#0A1424" strokeWidth="1.3"/>
+        <circle cx="223" cy="45" r="1.9" fill="#FF3B4E" style={{animation:"beaconBlink 2.3s linear infinite"}}/>
+        <line x1="16" y1="78" x2="16" y2="62" stroke="#0A1424" strokeWidth="1"/>
+        <circle cx="16" cy="61" r="1.4" fill={C.blue} style={{animation:"beaconBlink 3.1s linear .8s infinite"}}/>
+
+        {/* ── palms (foreground silhouettes) ── */}
+        <g fill="#02090F">
+          <animateTransform attributeName="transform" type="rotate" values="-1.4 44 124;1.4 44 124;-1.4 44 124" dur="6s" repeatCount="indefinite"/>
+          <path d="M44 124 q2 -18 0 -29 q11 4 15 -2 q-9 0 -13 -4 q11 -2 13 -9 q-11 2 -15 0 q2 -9 9 -11 q-10 0 -13 7 q-3 -7 -11 -8 q6 4 7 11 q-7 -2 -13 1 q8 2 13 7 q-8 3 -12 1 q6 7 14 5 q-2 13 0 31 Z"/>
+        </g>
+        <g fill="#02090F">
+          <animateTransform attributeName="transform" type="rotate" values="1.2 390 124;-1.2 390 124;1.2 390 124" dur="7.4s" repeatCount="indefinite"/>
+          <path d="M390 124 q2 -16 0 -25 q10 3 13 -2 q-8 0 -11 -3 q10 -2 11 -8 q-9 2 -13 0 q2 -8 8 -9 q-9 0 -11 6 q-3 -6 -10 -7 q5 3 6 9 q-6 -2 -11 1 q7 2 11 6 q-7 3 -10 1 q5 6 12 4 q-2 11 0 27 Z"/>
+        </g>
+
+        {/* ── layer 4: district scenery ── */}
+        {!plain&&locIdx===0&&<g>
+          <rect x="300" y="92" width="26" height="32" rx="3" fill={night?"#0A1226":"#1B0E2A"}/>
+          <rect x="306" y="88" width="14" height="6" rx="3" fill={C.flamingo} opacity=".85" style={{animation:"neonBuzz 4.4s linear infinite"}}/>
+          <rect x="304" y="98" width="18" height="2" fill={C.blue} opacity=".8"/>
+          <rect x="304" y="106" width="18" height="2" fill={C.blue} opacity=".6"/>
+          <g><circle cx="262" cy="120" r="6" fill={C.flamingo} opacity=".8"/><rect x="261" y="120" width="2" height="6" fill="#03101C"/></g>
+          <g><circle cx="278" cy="121" r="5" fill={C.gold} opacity=".8"/><rect x="277" y="121" width="2" height="5" fill="#03101C"/></g>
+        </g>}
+        {!plain&&locIdx===1&&<g>
+          <path d="M210 102 Q240 112 270 102" stroke={C.gold} strokeWidth="1" fill="none" opacity=".6"/>
+          {[216,228,240,252,264].map((x,i)=><circle key={i} cx={x} cy={104+Math.sin(i)*3} r="1.6" fill={[C.flamingo,C.gold,C.blue,C.orange,C.green][i]} style={{animation:`twinkle ${1.8+i*.3}s infinite`}}/>)}
+          <rect x="286" y="108" width="22" height="16" fill="#2A1430"/>
+          <rect x="288" y="110" width="8" height="12" fill={C.orange} opacity=".7"/>
+          <rect x="297" y="110" width="9" height="12" fill={C.blue} opacity=".6"/>
+        </g>}
+        {!plain&&locIdx===2&&<g>
+          <rect x="268" y="116" width="9" height="8" fill="#1A1208"/>
+          <path d="M270 116 q1 -5 2.5 -2 q1 -4 2.5 0 q1.5 -3 2 2 Z" fill={C.orange} opacity={night?".95":".5"} style={{animation:"twinkle 1.1s infinite"}}/>
+          <rect x="294" y="98" width="14" height="12" fill="#0A0A12"/>
+          <path d="M294 98 L308 110 M308 98 L294 110" stroke="#3A2E1A" strokeWidth="2"/>
+        </g>}
+        {!plain&&locIdx===3&&<g>
+          <path d="M252 124 L252 108 L266 100 L280 108 L280 124 Z" fill={night?"#0D1430":"#241032"}/>
+          <path d="M250 109 L266 99 L282 109" stroke={C.orange} strokeWidth="3" fill="none" opacity=".8"/>
+          <circle cx="294" cy="116" r="7" fill="#0A2418"/><rect x="293" y="120" width="2" height="5" fill="#03101C"/>
+          <circle cx="310" cy="117" r="5.5" fill="#0A2418"/><rect x="309" y="120" width="2" height="5" fill="#03101C"/>
+        </g>}
+        {!plain&&locIdx===4&&<g>
+          <path d="M250 128 L296 128 L290 134 L256 134 Z" fill="#0A0F1E"/>
+          <rect x="262" y="121" width="22" height="7" rx="2" fill="#101A30"/>
+          {[266,272,278].map((x,i)=><circle key={i} cx={x} cy="124" r="1.4" fill={[C.flamingo,C.blue,C.gold][i]} style={{animation:`twinkle ${.9+i*.25}s infinite`}}/>)}
+          <path d="M252 126 L296 126" stroke={C.blue} strokeWidth=".8" opacity=".7"/>
+        </g>}
+        {!plain&&locIdx===5&&<g>
+          <path d="M306 124 L309 94 L315 94 L318 124 Z" fill={night?"#0B1226":"#1C0E28"}/>
+          <rect x="307" y="88" width="10" height="7" rx="2" fill="#0A0F1E"/>
+          <circle cx="312" cy="91" r="2.2" fill={C.gold} style={{animation:"twinkle 2.4s infinite"}}/>
+          <path d="M312 91 L292 82 L292 100 Z" fill={C.gold} opacity=".12" style={{animation:"twinkle 2.4s infinite"}}/>
+          <path d="M256 131 L276 131 L272 135 L260 135 Z" fill="#0A0F1E"/>
+        </g>}
+
+        {/* ── neon horizon ── */}
+        <rect x="0" y={HZ-5} width="420" height="5" fill={locColor} opacity=".16"/>
+        <rect x="0" y={HZ} width="420" height="2.4" fill={locColor} opacity=".95"/>
+        <rect x="0" y={HZ} width="420" height="8" fill={locColor} opacity=".2"/>
+
+        {/* ── layer 5: wet asphalt / bay — smeared neon, not a mirror ── */}
+        <rect x="0" y={HZ+2} width="420" height={146-HZ-2} fill="url(#dxWaterF)"/>
+        {/* the horizon tube bleeding down into the wet */}
+        <rect x="0" y={HZ+2} width="420" height="6"  fill={locColor} opacity=".24"/>
+        <rect x="0" y={HZ+2} width="420" height="12" fill={locColor} opacity=".12"/>
+        <rect x="0" y={HZ+2} width="420" height="20" fill={locColor} opacity=".06"/>
+        {/* sun / moon light path */}
+        <rect x={orb.x-36} y={HZ+2} width="72" height={146-HZ-2} fill="url(#dxOrbRef)"/>
+        {/* vertical smears — signage first, then a few window columns */}
+        <g style={{animation:"reflShimmer 5.6s ease-in-out infinite"}}>
+          {SKY_SIGNS.map((s,i)=>(<g key={"s"+i}>
+            <rect x={s.x+s.w*.06} y={HZ+2} width={s.w*.88} height="22" fill={s.c} opacity=".13"/>
+            <rect x={s.x+s.w*.22} y={HZ+2} width={s.w*.56} height="15" fill={s.c} opacity=".2"/>
+            <rect x={s.x+s.w*.4}  y={HZ+2} width={s.w*.2}  height="9"  fill={s.c} opacity=".34"/>
+          </g>))}
+          {BUILD1.map(([x,bh,bw],i)=>i%2===0?(
+            <rect key={"w"+i} x={x+bw*.34} y={HZ+2} width="2.6" height={7+((i*5)%11)} fill={winWarm} opacity=".22"/>
+          ):null)}
+        </g>
+        {/* ripple bands break the smears up */}
+        <g style={{animation:"reflBand 3.4s ease-in-out infinite alternate"}}>
+          {[126,129.5,133,136.5,140,143.5].map((y,i)=><rect key={i} x="0" y={y} width="420" height="1.5"
+            fill={night?"#02070E":"#04101C"} opacity={.4+i*.08}/>)}
+        </g>
+        <g stroke={locColor} strokeWidth="1" opacity=".38" style={{animation:"waterSh 5s ease-in-out infinite"}}>
+          <line x1="40" y1="131" x2="112" y2="131"/><line x1="192" y1="137" x2="262" y2="137"/><line x1="312" y1="133" x2="382" y2="133"/>
+        </g>
+
+        {/* ── layer 6: headlights on the causeway ── */}
+        <g>
+          <rect x="-14" y="120.4" width="7" height="1.5" rx=".75" fill="#FFE9A0" opacity=".9">
+            <animateTransform attributeName="transform" type="translate" values="0 0;450 0" dur="7.5s" repeatCount="indefinite"/>
+          </rect>
+          <rect x="430" y="118.6" width="7" height="1.5" rx=".75" fill="#FF7B7B" opacity=".85">
+            <animateTransform attributeName="transform" type="translate" values="0 0;-450 0" dur="10s" repeatCount="indefinite" begin="2s"/>
+          </rect>
+          <rect x="-14" y="119" width="5" height="1.2" rx=".6" fill="#FFF3C0" opacity=".7">
+            <animateTransform attributeName="transform" type="translate" values="0 0;450 0" dur="12s" repeatCount="indefinite" begin="4.4s"/>
+          </rect>
+        </g>
+
+        {/* ── layer 7: chopper + searchlight when the feds are close ── */}
+        {siren&&<g>
+          <rect x="150" y="13" width="15" height="5" rx="2.5" fill="#0A0F1C"/>
+          <rect x="142" y="11.4" width="30" height="1.6" rx=".8" fill="#0A0F1C">
+            <animateTransform attributeName="transform" type="rotate" values="0 157 12.2;180 157 12.2" dur=".22s" repeatCount="indefinite"/>
+          </rect>
+          <circle cx="151" cy="15.5" r="1.2" fill="#FF1733">
+            <animate attributeName="opacity" values="1;.2;1" dur=".8s" repeatCount="indefinite"/>
+          </circle>
+          <g transform="translate(157,18)">
+            <polygon points="0,0 -16,104 16,104" fill="#FFF7C8" opacity=".13">
+              <animateTransform attributeName="transform" type="rotate" values="-17;17;-17" dur="5.2s" repeatCount="indefinite"/>
+            </polygon>
+          </g>
+        </g>}
+      </svg>
+
+      {/* ── heat bleed ── */}
+      {hot>.35&&<div style={{position:"absolute",inset:0,pointerEvents:"none",
+        background:"radial-gradient(120% 80% at 50% 100%, rgba(196,24,28,.42), transparent 62%)",
+        opacity:(hot-.35)*1.5}}/>}
+      {hot>.45&&<div style={{position:"absolute",left:0,right:0,bottom:0,height:"66%",pointerEvents:"none",
+        background:"repeating-linear-gradient(0deg, rgba(255,120,60,.09) 0 2px, rgba(0,0,0,0) 2px 6px)",
+        animation:"hazeWave 2.8s ease-in-out infinite",willChange:"transform"}}/>}
+
+      {/* ── siren wash ── */}
+      {siren&&<>
+        <div style={{position:"absolute",inset:0,pointerEvents:"none",background:"linear-gradient(90deg, #FF173355, transparent 58%)",animation:"strobeL 1.5s linear infinite"}}/>
+        <div style={{position:"absolute",inset:0,pointerEvents:"none",background:`linear-gradient(270deg, ${C.blue}55, transparent 58%)`,animation:"strobeR 1.5s linear infinite"}}/>
+      </>}
+
+      {/* ── layer 8: CRT glass ── */}
+      <div style={{position:"absolute",inset:0,pointerEvents:"none",
+        background:"repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, rgba(0,0,0,0) 1px 3px)"}}/>
+      <div style={{position:"absolute",inset:0,pointerEvents:"none",
+        background:`radial-gradient(120% 100% at 50% 40%, transparent 46%, rgba(0,0,0,.5) 100%), linear-gradient(180deg, transparent 76%, ${C.dark} 100%)`}}/>
+    </div>
+  );
+});
+
 // TYPEWRITER + STORY SCENE (cinematic dialogue overlay)
 // ═══════════════════════════════════════════════════════════════
 const TypeText=({text,sound,onDone,instant})=>{
@@ -2089,7 +4165,7 @@ const StoryScene=({story,g,sound,onApply,onClose})=>{
               <div style={{fontFamily:fb,fontSize:14.5,lineHeight:1.55,color:C.text,fontStyle:"italic"}}>
                 {reaction
                   ?<TypeText key={"rx"} text={reaction.text} sound={sound} onDone={()=>{}} instant={false}/>
-                  :<TypeText key={idx} text={cur.text} sound={sound} instant={instant} onDone={()=>setTyped(true)}/>}
+                  :<TypeText key={idx} text={cur?.text||""} sound={sound} instant={instant} onDone={()=>setTyped(true)}/>}
               </div>
             </div>
           </div>
@@ -2269,6 +4345,65 @@ const CarRear=({sport})=>sport?(
   </svg>
 );
 
+// ═══════════════════════════════════════════════════════════════
+// SCREEN-SPACE CRT / VHS GRADE — one fixed layer over everything
+//   NOTE: a fixed + z-indexed element is its own stacking context,
+//   so mix-blend-mode cannot reach the page. Everything here is
+//   plain low-alpha compositing on purpose.
+// ═══════════════════════════════════════════════════════════════
+const CRTOverlay=memo(({heat=0,color=C.pink,night=false})=>{
+  const k=CL(heat/100,0,1);
+  return(
+  <div style={{position:"fixed",inset:0,zIndex:2,pointerEvents:"none",overflow:"hidden"}}>
+    {/* rolling scanlines — transform-animated so it composites, never repaints */}
+    <div style={{position:"absolute",left:0,right:0,top:"-100%",height:"300%",opacity:.44,
+      background:"repeating-linear-gradient(0deg, rgba(0,0,0,.34) 0 1px, rgba(0,0,0,0) 1px 3px)",
+      animation:"crtRoll 10s linear infinite",willChange:"transform"}}/>
+    {/* aperture grille — static, cheap */}
+    <div style={{position:"absolute",inset:0,opacity:.07,
+      background:"repeating-linear-gradient(90deg, rgba(255,45,123,.7) 0 1px, rgba(0,229,255,.7) 1px 2px, rgba(0,0,0,0) 2px 3px)"}}/>
+    {/* chromatic fringe at the tube edges */}
+    <div style={{position:"absolute",inset:0,opacity:.34,willChange:"transform",
+      background:`radial-gradient(120% 92% at -10% 50%, ${C.pink}3a, transparent 40%), radial-gradient(120% 92% at 110% 50%, ${C.blue}3a, transparent 40%)`,
+      animation:"aberrJit 3.7s ease-in-out infinite"}}/>
+    {/* district bloom off the top of the frame */}
+    <div style={{position:"absolute",left:0,right:0,top:0,height:"30%",opacity:.3,
+      background:`linear-gradient(180deg, ${color}44, transparent)`,
+      animation:"bloomBreath 6.5s ease-in-out infinite"}}/>
+    {/* vignette + tube curvature */}
+    <div style={{position:"absolute",inset:0,
+      background:`radial-gradient(132% 108% at 50% 46%, transparent 42%, rgba(0,0,0,${night?".5":".4"}) 78%, rgba(0,0,0,.84) 100%)`}}/>
+    <div style={{position:"absolute",inset:-2,borderRadius:16,
+      boxShadow:"inset 0 0 90px rgba(0,0,0,.62), inset 0 0 12px rgba(0,0,0,.9)"}}/>
+    {/* tracking glitch — one node, offscreen 90% of the time */}
+    <div style={{position:"absolute",left:"-6%",right:"-6%",height:26,willChange:"transform",
+      background:"linear-gradient(180deg, rgba(0,0,0,0), rgba(255,255,255,.42), rgba(0,229,255,.3), rgba(0,0,0,0))",
+      animation:"trackGlitch 13s linear 4s infinite"}}/>
+    {/* heat haze — only once the city starts cooking */}
+    {k>.42&&<div style={{position:"absolute",left:0,right:0,bottom:0,height:"64%",willChange:"transform",
+      opacity:CL((k-.42)*1.4,0,.9),
+      background:"repeating-linear-gradient(0deg, rgba(255,110,50,.10) 0 2px, rgba(0,0,0,0) 2px 7px)",
+      animation:"hazeWave 2.6s ease-in-out infinite"}}/>}
+    {/* red/blue strobe — they are on the block */}
+    {k>=.7&&<>
+      <div style={{position:"absolute",inset:0,background:"linear-gradient(90deg, rgba(255,23,51,.36), transparent 48%)",animation:"strobeL 1.5s linear infinite"}}/>
+      <div style={{position:"absolute",inset:0,background:`linear-gradient(270deg, ${C.blue}55, transparent 48%)`,animation:"strobeR 1.5s linear infinite"}}/>
+      <div style={{position:"absolute",inset:0,boxShadow:`inset 0 0 60px rgba(255,23,51,.35)`}}/>
+    </>}
+  </div>);
+});
+
+// ── district arrival wash — keyed on g.loc, replays on every move ──
+const DistrictWash=memo(({color})=>(
+  <div style={{position:"fixed",inset:0,zIndex:38,pointerEvents:"none",overflow:"hidden"}}>
+    <div style={{position:"absolute",inset:0,animation:"washTint .9s ease-out forwards",
+      background:`linear-gradient(180deg, ${color}33, transparent 48%, ${color}26)`}}/>
+    <div style={{position:"absolute",top:0,bottom:0,left:0,width:"32%",willChange:"transform",
+      background:`linear-gradient(90deg, transparent, ${color}55, rgba(255,255,255,.16), ${color}55, transparent)`,
+      animation:"washSweep .8s cubic-bezier(.4,0,.2,1) forwards"}}/>
+  </div>
+));
+
 const TravelOverlay=({from,to,car,boat})=>{
   const L=LOCS[to], F=LOCS[from];
   return(
@@ -2331,8 +4466,11 @@ const MiniShell=({title,desc,color,children,onAuto})=>(
       <div style={{fontFamily:fb,fontSize:12,fontStyle:"italic",color:C.dim,textAlign:"center",marginBottom:12}}>{desc}</div>
       {children}
       <div style={{textAlign:"center",marginTop:12}}>
-        <span onClick={onAuto} style={{fontFamily:ft,fontSize:9,letterSpacing:1,color:C.dim,
-          textDecoration:"underline",cursor:"pointer"}}>AUTO-RESOLVE INSTEAD</span>
+        {/* A real button: the span was a ~9px tap target on a 420px phone,
+            unreachable by keyboard and invisible to assistive tech. */}
+        <button onClick={onAuto} style={{fontFamily:ft,fontSize:10,letterSpacing:1,color:C.dim,
+          textDecoration:"underline",cursor:"pointer",background:"none",border:"none",
+          padding:"10px 16px",minHeight:44,touchAction:"manipulation"}}>AUTO-RESOLVE INSTEAD</button>
       </div>
     </div>
   </div>
@@ -2377,7 +4515,8 @@ const TimingMini=({cfg,sound,onDone})=>{
       <div style={{position:"absolute",top:6,bottom:6,left:`${zone[round]}%`,width:2,marginLeft:-1,background:cfg.color,boxShadow:`0 0 8px ${cfg.color}`}}/>
       <div ref={curRef} key={round} style={{position:"absolute",top:4,bottom:4,width:14,borderRadius:4,
         background:"#fff",boxShadow:"0 0 12px #fff",
-        animation:`sweepX ${1.15/cfg.speed}s linear infinite alternate`,
+        animationName:"sweepX",animationDuration:`${1.15/cfg.speed}s`,animationTimingFunction:"linear",
+        animationIterationCount:"infinite",animationDirection:"alternate",
         animationPlayState:locked?"paused":"running"}}/>
       {locked&&<Verdict score={locked.sc}/>}
     </div>
@@ -2584,6 +4723,72 @@ const ComicScreen=({idx,onTap,onSkip})=>{
   );
 };
 
+// ═══════════════════════════════════════════════════════════════
+// TITLE TREATMENT — neon tube logo + atmosphere bed
+// ═══════════════════════════════════════════════════════════════
+const TitleLogo=()=>(
+  <div style={{position:"relative",display:"inline-block",lineHeight:1.04,padding:"0 2px"}}>
+    {/* bloom ghost sitting behind the tube */}
+    <span aria-hidden="true" style={{position:"absolute",left:2,top:0,whiteSpace:"nowrap",
+      fontFamily:ft,fontWeight:"bold",fontSize:46,letterSpacing:3,color:C.pink,
+      filter:"blur(9px)",animation:"logoHum 3.8s ease-in-out infinite",pointerEvents:"none"}}>COCAINE</span>
+    {/* the tube itself */}
+    <span style={{position:"relative",display:"inline-block",whiteSpace:"nowrap",
+      fontFamily:ft,fontWeight:"bold",fontSize:46,letterSpacing:3,color:"#FFF1F7",
+      WebkitTextStroke:`1.1px ${C.pink}`,
+      textShadow:`0 0 5px #fff, 0 0 13px ${C.pink}, 0 0 32px ${C.pink}cc, 0 0 64px ${C.pink}66`,
+      animation:"logoBuzz 5.4s linear infinite"}}>COCAINE</span>
+    {/* glass shine sweeping the tube */}
+    <span style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none"}}>
+      <span style={{position:"absolute",top:0,bottom:0,left:0,width:"34%",display:"block",
+        background:"linear-gradient(90deg, transparent, rgba(255,255,255,.20), transparent)",
+        animation:"shineSweep 5s ease-in-out 1.4s infinite"}}/>
+    </span>
+  </div>
+);
+
+// Two sibling roots on purpose: the bed sits UNDER the title content (z 0),
+// the CRT glass sits OVER it (z 9). One wrapper could not do both.
+const TitleFX=()=>(<>
+  <div style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none",zIndex:0}}>
+    {/* low fog banks rolling across the middle distance */}
+    <div style={{position:"absolute",left:"-20%",right:"-20%",top:"38%",height:70,willChange:"transform",
+      background:`radial-gradient(60% 100% at 30% 50%, ${C.purple}44, transparent 70%), radial-gradient(50% 100% at 78% 50%, ${C.pink}33, transparent 70%)`,
+      filter:"blur(14px)",animation:"fogRoll 22s ease-in-out infinite alternate"}}/>
+    <div style={{position:"absolute",left:"-20%",right:"-20%",top:"52%",height:56,willChange:"transform",
+      background:`radial-gradient(55% 100% at 62% 50%, ${C.blue}33, transparent 72%)`,
+      filter:"blur(16px)",animation:"fogRoll 31s ease-in-out 3s infinite alternate-reverse"}}/>
+    {/* neon horizon line where the grid floor begins */}
+    <div style={{position:"absolute",left:0,right:0,bottom:"34%",height:2,background:C.pink,opacity:.85,
+      boxShadow:`0 0 10px ${C.pink}, 0 0 30px ${C.pink}, 0 0 70px ${C.pink}88`}}/>
+    <div style={{position:"absolute",left:0,right:0,bottom:"34%",height:60,
+      background:`linear-gradient(180deg, ${C.pink}33, transparent)`,opacity:.5}}/>
+    {/* foreground palm silhouettes */}
+    <svg viewBox="0 0 60 120" style={{position:"absolute",left:-6,bottom:0,width:112,height:224,opacity:.92,
+      transformOrigin:"50% 100%",animation:"palmSway 7s ease-in-out infinite"}}>
+      <path fill="#03060E" d="M30 120 q3 -46 1 -70 q14 6 20 -3 q-12 1 -17 -5 q14 -3 17 -12 q-14 3 -20 0 q3 -12 12 -15 q-14 0 -17 9 q-4 -9 -15 -11 q8 5 9 15 q-9 -3 -17 2 q10 3 17 9 q-10 4 -16 1 q7 10 19 7 q-3 17 0 73 Z"/>
+    </svg>
+    <svg viewBox="0 0 60 120" style={{position:"absolute",right:-10,bottom:0,width:96,height:192,opacity:.9,
+      transform:"scaleX(-1)",transformOrigin:"50% 100%",animation:"palmSway 9s ease-in-out 1.5s infinite"}}>
+      <path fill="#03060E" d="M30 120 q3 -42 1 -64 q13 6 19 -3 q-11 1 -16 -5 q13 -3 16 -11 q-13 3 -19 0 q3 -11 11 -14 q-13 0 -16 8 q-4 -8 -14 -10 q7 5 8 14 q-8 -3 -16 2 q9 3 16 8 q-9 4 -15 1 q7 9 18 6 q-3 16 0 68 Z"/>
+    </svg>
+  </div>
+  {/* CRT glass, over the title content */}
+  <div style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none",zIndex:9}}>
+    <div style={{position:"absolute",left:0,right:0,top:"-100%",height:"300%",opacity:.42,willChange:"transform",
+      background:"repeating-linear-gradient(0deg, rgba(0,0,0,.3) 0 1px, rgba(0,0,0,0) 1px 3px)",
+      animation:"crtRoll 12s linear infinite"}}/>
+    <div style={{position:"absolute",inset:0,opacity:.3,willChange:"transform",
+      background:`radial-gradient(120% 92% at -10% 50%, ${C.pink}3a, transparent 40%), radial-gradient(120% 92% at 110% 50%, ${C.blue}3a, transparent 40%)`,
+      animation:"aberrJit 3.7s ease-in-out infinite"}}/>
+    <div style={{position:"absolute",inset:0,
+      background:"radial-gradient(122% 102% at 50% 42%, transparent 42%, rgba(0,0,0,.58) 100%)"}}/>
+    <div style={{position:"absolute",left:"-6%",right:"-6%",height:24,willChange:"transform",
+      background:"linear-gradient(180deg, rgba(0,0,0,0), rgba(255,255,255,.32), rgba(0,229,255,.22), rgba(0,0,0,0))",
+      animation:"trackGlitch 9s linear 2s infinite"}}/>
+  </div>
+</>);
+
 const TitleScreen=({meta,cfg,setCfg,onPlay,onSafehouse,onLedger,onSound})=>{
   const pb=PLAYBOOKS[cfg.pb];
   const dailyInfo=getDailySeed();
@@ -2593,14 +4798,15 @@ const TitleScreen=({meta,cfg,setCfg,onPlay,onSafehouse,onLedger,onSound})=>{
     <div style={{minHeight:"100dvh",background:`linear-gradient(180deg, #12082E 0%, #2A0E45 30%, ${C.midnight} 62%)`,
       display:"flex",flexDirection:"column",alignItems:"center",padding:"34px 16px 90px",position:"relative",overflow:"hidden"}}>
       {/* synthwave grid floor */}
+<TitleFX/>
       <div style={{position:"absolute",left:"-30%",right:"-30%",bottom:0,height:"34%",transform:"perspective(220px) rotateX(58deg)",transformOrigin:"bottom",
         background:`repeating-linear-gradient(0deg, ${C.pink}33 0 2px, transparent 2px 44px), repeating-linear-gradient(90deg, ${C.pink}33 0 2px, transparent 2px 44px)`,
         animation:"gridScroll 2.4s linear infinite",maskImage:"linear-gradient(0deg, transparent, #000 70%)"}}/>
-      <div style={{position:"absolute",top:0,left:0,right:0,opacity:.5,maskImage:"linear-gradient(180deg,#000 30%,transparent 100%)",WebkitMaskImage:"linear-gradient(180deg,#000 30%,transparent 100%)"}}>
-        <MiamiSky move={0} heat={0} locColor={C.pink} locIdx={0}/>
+      <div style={{position:"absolute",top:0,left:0,right:0,opacity:.62,maskImage:"linear-gradient(180deg,#000 48%,transparent 100%)",WebkitMaskImage:"linear-gradient(180deg,#000 48%,transparent 100%)"}}>
+        <MiamiSkyDeluxe move={2} heat={0} locColor={C.pink} locIdx={0} plain/>
       </div>
       <div style={{position:"relative",textAlign:"center",marginBottom:6}}>
-        <Neon color={C.pink} size={42} flicker>COCAINE</Neon>
+        <TitleLogo/>
         <div style={{fontFamily:ft,fontWeight:"bold",fontSize:58,letterSpacing:6,lineHeight:1,
           background:`linear-gradient(180deg,#fff 12%, ${C.blue} 38%, #0A2A55 50%, ${C.blue} 60%, #fff 90%)`,
           WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",
@@ -2817,6 +5023,26 @@ const EscapeScreen=({g,onAttempt,onBack})=>{
       desc:"Zurich via Panama via a funeral home in Hialeah. You become a wire transfer, then a rumor.",
       ok:(g.npcState.cass&&g.npcState.cass.trust>=2)&&total>=35000&&!g.storyFlags.cass_burned,
       req:g.storyFlags.cass_burned?"Cass remembers things wrong about you now.":"Cass trust 2+ and $35,000", ending:"escape" },
+    { id:"photograph", name:"THE HEAD START", icon:"📷", cost:10000,
+      desc:"Ramirez burned two hundred and six pages behind a dead Zayre and told you to be gone. Gone means gone.",
+      ok:!!g.storyFlags.ramirez_debt&&total>=10000,
+      req:g.storyFlags.ramirez_vendetta?"He spent his vacation on you. There is no head start.":"Needs the detective's debt and $10,000", ending:"escape" },
+    { id:"shrimp_boat", name:"THE ISLAMORADA BOAT", icon:"🦈", cost:15000,
+      desc:"A shrimp boat with a bad radio and a good captain. Eleven hundred islands, forty police officers, and Thursday.",
+      ok:!!g.storyFlags.shark_boat&&(g.npcState.tiburon&&(g.npcState.tiburon.trust||0)>=2)&&total>=15000,
+      req:"Needs Tiburon's boat, trust 2+ and $15,000", ending:"escape" },
+    { id:"second_seat", name:"THE SECOND SEAT", icon:"💺", cost:20000,
+      desc:"Same strip near Homestead, worse plane, no discount. She wrote it on a clipboard, which is more binding than a contract.",
+      ok:!!g.storyFlags.seat_rebought&&total>=20000,
+      req:"Needs the seat you bought back and $20,000", ending:"escape" },
+    { id:"medellin", name:"THE INVITATION", icon:"✈️", cost:30000,
+      desc:"Not an escape. A TRANSFER. A farm above the valley, a telephone that rings when he wants it to, and no return leg.",
+      ok:!!g.storyFlags.cartel_supplier&&(g.npcState.colombiano&&(g.npcState.colombiano.trust||0)>=4)&&total>=30000&&!g.storyFlags.became_informant,
+      req:g.storyFlags.became_informant?"You talked to the government. There is no invitation.":"Needs cartel supply, standing 4+ and $30,000", ending:"escape" },
+    { id:"quiet_crown", name:"THE QUIET CROWN", icon:"🃏", cost:0,
+      desc:"No rooftop, no press. The rival left through departures, the honest cop burned his own file, and nobody announced anything.",
+      ok:!!g.storyFlags.col_exile_witnessed&&!!g.storyFlags.ramirez_debt&&g.cred>=60&&(g.totalProfit||0)>=250000&&turfCt>=3,
+      req:"Cartel exiled, detective's debt, cred 60+, $250K, 3 districts", ending:"kingpin" },
     { id:"kingpin", name:"CLAIM THE CITY", icon:"👑", cost:0,
       desc:"Stop running. Make Miami yours. Forever has a price — paid in advance.",
       ok:g.cred>=80&&(g.totalProfit||0)>=500000&&turfCt>=4, req:"Cred 80+, $500K profit, 4 districts", ending:"kingpin" },
@@ -2844,6 +5070,22 @@ const EscapeScreen=({g,onAttempt,onBack})=>{
 };
 
 const FINALES={
+  photograph:{ who:"ramirez", mood:"tired", title:"THE HEAD START", color:C.blue,
+    lines:["He does not come to see you off, because that would be a thing a friend does and this is not that. He sends a message through a barber on Calle Ocho: nine words, no signature. NORTHBOUND LANES ARE CLEAR UNTIL SIX. GO NOW.",
+      "You take US 1 out of Dade County at 4:40 in the morning with the windows down, past the Krome Avenue turnoff, past the last streetlight, past the point where the radio stations start belonging to somebody else.",
+      "In a parking lot behind a closed department store, ash from two hundred and six pages is still in a shopping cart, and a man who makes thirty-eight thousand dollars a year is at home, awake, deciding for the rest of his life whether he did the right thing."] },
+  shrimp_boat:{ who:"tiburon", mood:"neutral", title:"ELEVEN HUNDRED ISLANDS", color:C.green,
+    lines:["The boat smells like diesel and forty years of ice, and the captain is somebody’s cousin, and Tiburón stands on the dock in a shirt with parrots on it, waving with a fillet knife like a man seeing off a cruise.",
+      "“Remember the geography, amigo!” he shouts across the water. “There is no smuggler! There is only a fishing guide, and there is THURSDAY!” The gold tooth catches the last of the dock light and then the dock light is gone.",
+      "Somewhere south of Marathon the water turns a color that does not exist in Miami. Nobody files a report, because nobody has anything to report: a boat went out, a boat came back, and the manifest said ice."] },
+  second_seat:{ who:"maria", mood:"knowing", title:"THE SECOND CHARTER", color:C.flamingo,
+    lines:["The plane is worse this time — a Cessna with one working landing light and a pilot who apologizes for the seat belt. Maria is already on board, doing inventory on a clipboard at five in the morning, because she is incapable of waiting like a normal person.",
+      "“You bought this seat twice,” she says, without looking up. “That is either the most expensive lesson in Dade County or the only one that ever took. I have decided not to tell you which.”",
+      "At altitude she finally puts the clipboard down and looks out the window at the pink and blue and gold of a city that is no longer a factor in either of your lives. “God,” she says. “It really is beautiful from the outside.”"] },
+  medellin:{ who:"colombiano", mood:"pleased", title:"THE INVITATION", color:C.orange,
+    lines:["There is no forger, no charter, no numbered account. There is a first-class ticket in your own name and a customs officer in Rionegro who takes your passport, looks at nothing, and says “Welcome home, señor,” in a country you have never been to.",
+      "“You misunderstand what has happened,” El Colombiano says on the drive up into the valley, where the air gets thin and green. “You did not escape Miami. Miami was a POSITION, and we have moved you off it. There is a difference, and one day it will matter to you.”",
+      "The farm has a telephone that rings only when he decides it should. Some nights the fog comes up the mountain and covers everything, and you stand on the terrace with a drink you did not pour, a wealthy man in exile, listening to a phone that is not ringing yet."] },
   maria:{ who:"maria", mood:"flirty", title:"THE LAST FLIGHT OUT", color:C.flamingo,
     lines:["The airstrip near Homestead is a scar of cracked tarmac between two tomato fields. The plane is older than you and twice as tired. Maria is leaning against it like it owes her money.",
       "\u201cYou actually came,\u201d she says, and for one second the armor slips \u2014 then it\u2019s back, polished. \u201cMost of them don\u2019t, you know. Most of them love the table too much to leave it.\u201d",
@@ -3038,7 +5280,7 @@ export default function Cocaine80s(){
       else if(e.type==="HITSTOP"){ setHitstop(true); setTimeout(()=>setHitstop(false),130); }
       else if(e.type==="SCREEN") setScreen(e.screen);
       else if(e.type==="PING"){ if(e.stat==="hp"){ setFlash("#FF173328"); setTimeout(()=>setFlash(null),320); } }
-      else if(e.type==="ERA_SHIFT") setEraOv(ERAS[e.eraIdx]);
+      else if(e.type==="ERA_SHIFT"){ setEraOv(ERAS[e.eraIdx]); if(meta.sound) SFX.era(); }
       else if(e.type==="GAME_OVER") over=e.ending;
       else if(e.type==="CASHFLY") spawnFly(e.count);
       else if(e.type==="BREAKDOWN"){ setBreakdown(e.data); setTimeout(()=>setBreakdown(null),2700); }
@@ -3092,7 +5334,10 @@ export default function Cocaine80s(){
       if(g.ending==="escape"||g.ending==="kingpin"){ m.wins=meta.wins+1; m.winStreak=(meta.winStreak||0)+1; m.maxHeatBeaten=Math.max(meta.maxHeatBeaten??-1,g.heatLevel||0); }
       else m.winStreak=0;
       saveMeta(m); setMeta(m); setRepEarned(rep);
-      if(meta.sound)(g.ending==="escape"||g.ending==="kingpin"?SFX.sellMassive:SFX.police)();
+      if(meta.sound){ MUSIC.stop();
+        (g.ending==="escape"||g.ending==="kingpin"?SFX.endingWin:SFX.endingLose)();
+        newAch.forEach((_,i)=>setTimeout(()=>{ if(!AUDIO.isMuted()) SFX.achievement(i); },1300+i*760));
+      }
     }
   },[screen]);
 
@@ -3100,15 +5345,50 @@ export default function Cocaine80s(){
   useEffect(()=>{
     if(screen==="game"&&meta.sound){
       synth.current=new SynthLoop();
-      synth.current.start(()=>({era:gRef.current?.currentEra||0,heat:gRef.current?.fedHeat||0,loc:gRef.current?.loc||0}));
+      synth.current.start(()=>{ const s=gRef.current||{};
+        return { era:s.currentEra||0, heat:s.fedHeat||0, loc:s.loc||0,
+                 night:(s.move||0)%2===1, move:s.move||0, deals:s.totalDeals||0 }; });
       return ()=>synth.current&&synth.current.stop();
     }
   },[screen,meta.sound]);
 
+  // ── audio lifecycle: gesture unlock, mute, tab-hide suspend ──
+  useEffect(()=>{ AUDIO.setMuted(!meta.sound); },[meta.sound]);
+  useEffect(()=>{
+    if(typeof window==="undefined") return;
+    const onGesture=()=>AUDIO.unlock();
+    const onVis=()=>AUDIO.setHidden(!!document.hidden);
+    window.addEventListener("pointerdown",onGesture,{passive:true});
+    window.addEventListener("keydown",onGesture);
+    document.addEventListener("visibilitychange",onVis);
+    return ()=>{
+      window.removeEventListener("pointerdown",onGesture);
+      window.removeEventListener("keydown",onGesture);
+      document.removeEventListener("visibilitychange",onVis);
+      MUSIC.stop();
+    };
+  },[]);
+
+  // title-screen theme — slow, wet, drumless. Owner-guarded so it can never
+  // collide with the in-game transport during a screen change.
+  useEffect(()=>{
+    if(screen==="title"&&meta.sound){
+      MUSIC.start(()=>({scene:"title",era:0,heat:6,loc:0,night:true}),"title");
+      return ()=>MUSIC.stop("title");
+    }
+  },[screen,meta.sound]);
+
+  // dialogue chime when a storylet opens
+  const lastStoryId=useRef(null);
+  useEffect(()=>{
+    const id=g&&g.activeStorylet?g.activeStorylet.id:null;
+    if(id&&id!==lastStoryId.current&&meta.sound) SFX.storylet();
+    lastStoryId.current=id;
+  },[g&&g.activeStorylet?g.activeStorylet.id:null,meta.sound]);
   // low drone under the police stop
   useEffect(()=>{
     if(screen==="police"&&meta.sound){
-      const t=setInterval(()=>{ tone(55,.55,"sine",.05); tone(58,.55,"sine",.03); },600);
+      const t=setInterval(SFX.chaseBed,900); SFX.chaseBed();
       return ()=>clearInterval(t);
     }
   },[screen,meta.sound]);
@@ -3142,7 +5422,7 @@ export default function Cocaine80s(){
     const useCar=g.lifestyle.includes("car");
     const useBoat=dest===5&&(g.lifestyle.includes("boat")||!!g.importBonus);
     setTravelOv({from:fromLoc,to:dest,car:useCar,boat:useBoat});
-    if(meta.sound){ tone(useBoat?90:130,.55,"sawtooth",.05,0,useCar?260:150); tone(60,.5,"sine",.04); }
+    if(meta.sound) SFX.travelMove(useCar,useBoat);
     const driveMs=useCar&&!useBoat?640:940;
     setTimeout(()=>{
       const res=act(processTravel,dest);
@@ -3153,6 +5433,7 @@ export default function Cocaine80s(){
       if(res.dealEvent) pending={type:"deal",data:res.dealEvent};
       else if(res.randEnc) pending={type:"enc",data:res.randEnc};
       else if(res.turfWar) pending={type:"turf",data:res.turfWar};
+      else if(res.worldEvent) pending={type:"world",data:res.worldEvent};
       else if(res.newspaper) pending={type:"news",data:res.newspaper};
       pendingModal.current=pending;
     },Math.floor(driveMs*.45));
@@ -3170,7 +5451,7 @@ export default function Cocaine80s(){
       spawnFly(CL(Math.ceil(n/4),3,6),{from:exch(cashRef),to:sc,spread:24});
     } };
   const doSell=()=>{ const i=selDrug; const n=qty==="max"?g.inv[i]:Math.min(qty,g.inv[i]);
-    if(act(processSell,i,n)){ markCoach("sell_here"); markCoach("heat_warn");
+    if(act(processSell,i,n)){ markCoach("sell_here");
       const sc=exch(sheetRef)||{x:(typeof window!=="undefined"?window.innerWidth:400)/2,y:420};
       spawnFly(CL(Math.ceil(n/2),3,9),{emoji:DRUGS[i].emoji,from:sc,
         to:{x:(typeof window!=="undefined"?window.innerWidth:400)+70,y:sc.y-40},spread:90,fade:true});
@@ -3195,6 +5476,12 @@ export default function Cocaine80s(){
       return ns;
     });
   };
+  const worldAct=o=>{ const ev=modal.data; setModal(null); if(meta.sound)SFX.click();
+    if(o.id==="assault"){ setMini({kind:"mash",cfg:{title:"🔫 TAKE THE DOCK",
+      desc:"His whole organization is on that pier. Push until something breaks.",
+      rival:CL(Math.round(((g.rival&&g.rival.power)||10)*0.22),4,11),
+      done:sc=>act(resolveWorldEvent,ev,o,sc)}}); return; }
+    act(resolveWorldEvent,ev,o); };
   const encAct=action=>{ const enc=modal.data; setModal(null);
     if(action==="leave"||action==="decline") return;
     if(enc.type==="mugger"&&action==="fight"&&!g.gun){
@@ -3284,6 +5571,10 @@ export default function Cocaine80s(){
       :selDrug!=null&&mode==="buy"&&!g.coach.buy_low?"buy_low"
       :tab==="market"&&used>0&&!g.coach.travel_tip&&selDrug==null?"travel_tip"
       :tab==="market"&&!g.coach.sell_here&&selDrug==null&&g.inv.some((q,i)=>q>0&&g.prices[i]>g.avgCost[i]&&g.avgCost[i]>0)?"sell_here"
+      // heat_warn was marked seen on every sell but never listed here, so the
+      // game's only heat tutorial could never render. Show it once heat is
+      // actually visible to the player (the HUD reveals it at 5).
+      :tab==="market"&&!g.coach.heat_warn&&selDrug==null&&g.fedHeat>=8?"heat_warn"
       :null);
   const TABS=[["market","💊"],["travel","🗺"],["bank","🏦"],["empire","👑"],["contacts","📇"],["life","🕶"]];
 
@@ -3294,7 +5585,7 @@ export default function Cocaine80s(){
       animation:shake?"shakeA .42s ease":"none",paddingBottom:74}}>
 
       {/* ── LIVING SKYLINE HEADER ── */}
-      <MiamiSky move={g.move} heat={g.fedHeat} locColor={loc.color} locIdx={g.loc}/>
+      <MiamiSkyDeluxe move={g.move} heat={g.fedHeat} locColor={loc.color} locIdx={g.loc}/>
       <div style={{position:"fixed",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg, ${era.color}10 0%, transparent 34%)`}}/>
       <div style={{padding:"8px 12px 0"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
@@ -3315,6 +5606,7 @@ export default function Cocaine80s(){
           {hud.cred&&<HudChip icon="⭐" label={g.cred} color={C.gold} bar={g.cred}/>}
           {g.streak>=2&&<div style={{...bx,padding:"5px 10px",border:`1px solid ${C.orange}66`,fontFamily:ft,fontSize:11,fontWeight:"bold",color:C.orange,animation:"hudPing .5s ease"}}>🔥×{g.streak}</div>}
           <div ref={bagRef} style={{...bx,padding:"5px 10px",fontFamily:ft,fontSize:11,color:C.dim}}>🎒{used}/{g.coatSp}</div>
+          <HeatPlanChip g={g}/>
         </div>
 
         {/* THE PLAN — act tracker */}
@@ -3355,8 +5647,10 @@ export default function Cocaine80s(){
       <div style={{padding:"0 12px",position:"relative"}}>
         {coachKey==="tap_drug"&&<CoachMark k="tap_drug" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
         {coachKey==="sell_here"&&<CoachMark k="sell_here" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
+        {coachKey==="heat_warn"&&<CoachMark k="heat_warn" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
 
         {tab==="market"&&<div>
+          <MarketWire g={g}/>
           {g.colTurf?.[g.loc]&&!g.storyFlags.col_peace&&<div style={{...bx,marginBottom:8,padding:"7px 10px",border:`1px solid ${C.orange}66`,
             fontFamily:ft,fontSize:10,color:C.orange}}>🇨🇴 HIS BLOCK — his crews undercut you. Sales pay −12% here.</div>}
           {DRUGS.map((d,i)=>{
@@ -3367,7 +5661,7 @@ export default function Cocaine80s(){
                 animation:`riseIn .3s ${i*.04}s ease both`,
                 border:`1px solid ${selDrug===i?loc.color:owned>0?C.gold+"55":C.border}`}}
               onClickCapture={()=>setSheetExit(false)}>
-              <span style={{fontSize:22}}>{d.emoji}</span>
+              <DrugGlyph d={d} owned={owned} sel={selDrug===i}/>
               <div style={{flex:1}}>
                 <div style={{fontFamily:ft,fontSize:13,fontWeight:"bold",color:C.text}}>{d.name}
                   {owned>0&&<span style={{color:C.gold,fontSize:10}}> ×{owned}</span>}
@@ -3386,13 +5680,13 @@ export default function Cocaine80s(){
                       spawnFly(CL(Math.ceil(g.inv[i]/2)||3,3,8),{emoji:DRUGS[i].emoji,from,
                         to:{x:(typeof window!=="undefined"?window.innerWidth:400)+70,y:from.y-30},spread:60,fade:true});
                     }
-                    markCoach("sell_here");markCoach("heat_warn");}}
+                    markCoach("sell_here");}}
                   style={{fontFamily:ft,fontSize:10,fontWeight:"bold",padding:"4px 8px",borderRadius:10,cursor:"pointer",
                   background:C.green+"22",color:C.green,border:`1px solid ${C.green}66`,boxShadow:`0 0 10px ${C.green}33`}}>
                   💰SELL ×{owned}</span>
                 :<span style={{fontFamily:ft,fontSize:10,fontWeight:"bold",padding:"3px 7px",borderRadius:10,
                   background:C.pink+"22",color:C.pink}}>{FM(profit)}/u</span>)}
-              <Sparkline data={g.hist[i]} color={loc.color}/>
+              <SparkPro data={g.hist[i]} color={loc.color} avg={owned>0?g.avgCost[i]:0}/>
               <div style={{textAlign:"right",minWidth:64}}>
                 <PriceCell value={g.prices[i]}/>
                 <TrendArrow hist={g.hist[i]}/>
@@ -3402,6 +5696,7 @@ export default function Cocaine80s(){
 
         {tab==="travel"&&<div>
           <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:C.dim,marginBottom:8}}>◆ EVERY TRIP MOVES THE MARKET — AND THE HEAT</div>
+          <DistrictBoard g={g}/>
           <div style={{fontFamily:ft,fontSize:8.5,color:C.dim,marginBottom:8}}>
             ST/MID/WT = street, mid-tier, weight ◆ <span style={{color:C.green}}>▼ buys cheap</span> ◆ <span style={{color:C.gold}}>▲ sells high</span> ◆ <span style={{color:C.pink}}>⚔ rival spotted</span></div>
           {LOCS.map((l,i)=>(
@@ -3430,7 +5725,7 @@ export default function Cocaine80s(){
         </div>}
 
         {tab==="bank"&&<BankTab g={g} act={act} meta={meta} onEscape={()=>setScreen("escape")} markCoach={markCoach}/>}
-        {tab==="empire"&&<EmpireTab g={g} act={act}/>}
+        {tab==="empire"&&<EmpireTab g={g} act={act} setMini={setMini}/>}
         {tab==="contacts"&&<ContactsTab g={g}/>}
         {tab==="life"&&<LifeTab g={g} act={act}/>}
       </div>
@@ -3491,7 +5786,7 @@ export default function Cocaine80s(){
         {coachKey==="travel_tip"&&<CoachMark k="travel_tip" style={{top:-30,left:"14%"}}/>}
         {TABS.map(([k,icon])=>{
           const on=unlocks[k];
-          return(<button key={k} disabled={!on} onClick={()=>{ setTab(k); setSelDrug(null); if(k==="bank")markCoach("debt_tip"); if(k==="travel")markCoach("travel_tip"); if(meta.sound)SFX.click(); }}
+          return(<button key={k} disabled={!on} onClick={()=>{ if(tab==="bank"&&k!=="bank")markCoach("debt_tip"); setTab(k); setSelDrug(null); if(k==="travel"){markCoach("travel_tip"); if(coachKey==="heat_warn")markCoach("heat_warn");} if(meta.sound)SFX.click(); }}
             style={{flex:1,background:"none",border:"none",cursor:on?"pointer":"default",opacity:on?1:.25,padding:"4px 0"}}>
             <div style={{fontSize:17,filter:tab===k?`drop-shadow(0 0 6px ${loc.color})`:"grayscale(.6)"}}>{on?icon:"🔒"}</div>
             <div style={{fontFamily:ft,fontSize:7.5,letterSpacing:1,color:tab===k?loc.color:C.dim,fontWeight:tab===k?"bold":"normal"}}>{k.toUpperCase()}</div>
@@ -3499,7 +5794,7 @@ export default function Cocaine80s(){
       </div>
 
       {/* ── OVERLAYS ── */}
-      {g.activeStorylet&&<StoryScene story={g.activeStorylet} g={g} sound={meta.sound}
+      {g.activeStorylet&&<StoryScene key={g.activeStorylet.id} story={g.activeStorylet} g={g} sound={meta.sound}
         onApply={(ns,ch)=>{ setG({...ns,activeStorylet:g.activeStorylet});
           if(meta.sound)SFX.coin();
           if(ch.effects&&ch.effects.cashDelta>0){ addPart(`+${FM(ch.effects.cashDelta)}`,C.green,.42); spawnFly(8); } }}
@@ -3509,12 +5804,14 @@ export default function Cocaine80s(){
       {modal&&modal.type==="enc"&&<EncounterModal enc={modal.data} onAct={encAct}/>}
       {modal&&modal.type==="turf"&&<TurfWarModal war={modal.data} g={g} onAct={turfAct}/>}
       {modal&&modal.type==="deal"&&<DealStepModal deal={modal.data} g={g} onAct={dealAct}/>}
+      {modal&&modal.type==="world"&&<WorldEventModal ev={modal.data} g={g} onAct={worldAct}/>}
       {mini&&<MiniGame mini={mini} sound={meta.sound}
         onDone={sc=>{ const d=mini.cfg.done; setMini(null); d(sc); }}/>}
       {travelOv&&<TravelOverlay {...travelOv}/>}
       {eraOv&&<EraTakeover era={eraOv} onDone={()=>setEraOv(null)}/>}
       {dealScene&&<DealSceneFX d={dealScene}/>}
       {breakdown&&<SaleBreakdown d={breakdown}/>}
+      <DistrictWash key={"w"+g.loc} color={loc.color}/>
       <FlightLayer flights={flights}/>
 
       {/* floating numbers */}
@@ -3526,7 +5823,7 @@ export default function Cocaine80s(){
       </div>
       {flash&&<div style={{position:"fixed",inset:0,zIndex:52,pointerEvents:"none",background:flash,animation:"flashFade .38s ease forwards"}}/>}
       {hitstop&&<div style={{position:"fixed",inset:0,zIndex:52,pointerEvents:"none",background:"radial-gradient(ellipse, transparent 40%, #ffffff33 100%)"}}/>}
-      <div style={{position:"fixed",inset:0,zIndex:2,pointerEvents:"none",opacity:.5,background:"repeating-linear-gradient(0deg, rgba(0,0,0,.09) 0 1px, transparent 1px 3px)"}}/>
+      <CRTOverlay heat={g.fedHeat} color={loc.color} night={night}/>
       {g.streak>=3&&<div style={{position:"fixed",inset:0,zIndex:3,pointerEvents:"none",
         animation:`streakBorder 1.4s ease-in-out infinite${g.streak>=6?", rainbowB 3s linear infinite":""}`}}/>}
     </div>
@@ -3534,6 +5831,235 @@ export default function Cocaine80s(){
 }
 
 // ── HUD chip ──
+// ═══════════════════════════════════════════════════════════════
+// LIVING CITY — READOUTS. Everything the new systems do is legible
+// before the player commits to a move.
+// ═══════════════════════════════════════════════════════════════
+const wireTone=t=>t==="good"?C.green:t==="bad"?C.pink:C.blue;
+
+const NewsWireList=({wire,n=3})=>{
+  const rows=(wire||[]).slice(0,n);
+  if(!rows.length) return null;
+  return(<div style={{marginTop:6,borderTop:`1px solid ${C.border}`,paddingTop:5}}>
+    {rows.map((w,i)=><div key={i} style={{fontFamily:fb,fontSize:10.5,fontStyle:"italic",
+      color:wireTone(w.tone),opacity:1-i*0.22,marginBottom:2,lineHeight:1.35}}>{w.icon} {w.text}</div>)}
+  </div>);
+};
+
+// ── STREET INTEL — sits above the market list ──
+const MarketWire=({g})=>{
+  const loc=g.loc;
+  const ld=(g.locDemand||[])[loc]||DRUGS.map(()=>1);
+  const pat=(g.patrols||[])[loc]||0, inf=(g.informants||[])[loc]||0;
+  const live=(g.shocks||[]).filter(k=>!k.pending&&(k.loc<0||k.loc===loc));
+  const soon=(g.shocks||[]).filter(k=>k.pending);
+  const fld=g.rival&&g.rival.flood;
+  const flood=(fld&&fld.loc===loc&&g.move<fld.until)?fld:null;
+  const ranked=ld.map((v,i)=>({i,v}));
+  const hot=ranked.filter(x=>x.v>=1.08).sort((a,b)=>b.v-a.v).slice(0,3);
+  const cold=ranked.filter(x=>x.v<=0.9).sort((a,b)=>a.v-b.v).slice(0,3);
+  const vol=(g.districtSales||[])[loc]||0;
+  const patLabel=pat>=4?"SATURATION":pat>=2.5?"HEAVY":"NORMAL";
+  const patColor=pat>=4?"#FF1733":pat>=2.5?C.orange:C.dim;
+  return(
+  <div style={{...bx,marginBottom:8,padding:"8px 10px",border:`1px solid ${C.blue}33`}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+      <span style={{fontFamily:ft,fontSize:8.5,letterSpacing:2,color:C.blue}}>
+        ◆ STREET INTEL — {LOCS[loc].name.toUpperCase()}</span>
+      <span style={{fontFamily:ft,fontSize:9,color:patColor}}>
+        {"🚔".repeat(CL(Math.round(pat),1,5))} {patLabel}</span>
+    </div>
+    {inf>=1&&<div style={{fontFamily:ft,fontSize:9.5,color:inf>=2.5?"#FF1733":C.orange,marginBottom:4}}>
+      🐀 INFORMANT WORKING THIS DISTRICT ({inf.toFixed(1)}/5) — settle it in EMPIRE, or trade elsewhere
+    </div>}
+    {flood&&<div style={{fontFamily:ft,fontSize:9.5,color:C.orange,marginBottom:4}}>
+      🇨🇴 His crews are dumping {DRUGS[flood.drug].name} here — prices held down {Math.max(1,flood.until-g.move)} more move(s)
+    </div>}
+    {live.map((k,i)=><div key={"lv"+i} style={{fontFamily:ft,fontSize:9.5,marginBottom:3,
+      color:k.kind==="spike"?C.green:C.pink}}>
+      {k.icon} {k.kind==="spike"?"SPIKE":"CRASH"} ×{k.mult.toFixed(2)} on {DRUGS[k.drug].name} — {k.moves} move(s) left
+    </div>)}
+    {soon.map((k,i)=><div key={"sn"+i} style={{fontFamily:ft,fontSize:9.5,color:C.gold,marginBottom:3,
+      animation:"hudPulse 1.8s infinite",borderRadius:6,padding:"2px 4px"}}>
+      📻 INCOMING — {k.warn}
+    </div>)}
+    {vol>=12&&<div style={{fontFamily:ft,fontSize:9.5,color:C.dim,marginBottom:4}}>
+      📦 You have moved {Math.round(vol)} units through here lately — the buyers are getting picky</div>}
+    {(hot.length>0||cold.length>0)&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:4}}>
+      {hot.map(x=><span key={"h"+x.i} style={{fontFamily:ft,fontSize:9,color:C.gold,
+        border:`1px solid ${C.gold}44`,borderRadius:8,padding:"2px 6px"}}>
+        {DRUGS[x.i].emoji} HUNGRY ×{x.v.toFixed(2)}</span>)}
+      {cold.map(x=><span key={"c"+x.i} style={{fontFamily:ft,fontSize:9,color:C.dim,
+        border:`1px solid ${C.border}`,borderRadius:8,padding:"2px 6px"}}>
+        {DRUGS[x.i].emoji} SATURATED ×{x.v.toFixed(2)}</span>)}
+    </div>}
+    <NewsWireList wire={g.newsWire} n={3}/>
+  </div>);
+};
+
+// ── DISPATCH BOARD — sits above the travel list ──
+const DistrictBoard=({g})=>(
+  <div style={{...bx,marginBottom:8,padding:"8px 10px",border:`1px solid ${C.blue}33`}}>
+    <div style={{fontFamily:ft,fontSize:8.5,letterSpacing:2,color:C.blue,marginBottom:5}}>
+      ◆ DISPATCH BOARD — READ IT BEFORE YOU DRIVE</div>
+    {LOCS.map((l,i)=>{
+      const dh=heatAt(g,i).next-g.fedHeat;
+      const pat=(g.patrols||[])[i]||0, inf=(g.informants||[])[i]||0;
+      const sk=(g.shocks||[]).filter(k=>!k.pending&&(k.loc<0||k.loc===i));
+      return(<div key={l.name} style={{display:"flex",alignItems:"center",gap:6,fontFamily:ft,fontSize:9,
+        padding:"3px 0",borderBottom:i<LOCS.length-1?`1px solid ${C.border}66`:"none"}}>
+        <span style={{width:15}}>{l.icon}</span>
+        <span style={{flex:1,color:i===g.loc?l.color:C.text}}>
+          {l.name}{g.turf[i]>0?" "+TURF_LEVELS[g.turf[i]].icon:""}</span>
+        <span style={{minWidth:36,textAlign:"right",color:dh<0?C.green:dh>0?C.pink:C.dim}}>
+          🔥{dh>0?"+":""}{dh}</span>
+        <span style={{minWidth:32,textAlign:"right",color:pat>=4?"#FF1733":pat>=2.5?C.orange:C.dim}}>
+          🚔{pat.toFixed(1)}</span>
+        <span style={{minWidth:16,textAlign:"right",color:inf>=1?"#FF1733":C.border}}>{inf>=1?"🐀":"·"}</span>
+        <span style={{minWidth:34,textAlign:"right"}}>
+          {sk.length?sk.map((k,j)=><span key={j} style={{color:k.kind==="spike"?C.green:C.pink}}>
+            {k.kind==="spike"?"▲":"▼"}{DRUGS[k.drug].emoji}</span>):<span style={{color:C.border}}>·</span>}</span>
+        <span style={{minWidth:16,textAlign:"right",color:C.orange}}>{(g.colTurf||[])[i]?"🇨🇴":""}</span>
+      </div>);})}
+    <div style={{fontFamily:ft,fontSize:8,color:C.dim,marginTop:5,lineHeight:1.4}}>
+      🔥 heat change if you go there now ◆ 🚔 patrol pressure ◆ 🐀 informant ◆ ▲▼ live supply shock</div>
+    <NewsWireList wire={g.newsWire} n={2}/>
+  </div>
+);
+
+// ── HEAT FORECAST CHIP — heat becomes a plan, not a surprise ──
+const HeatPlanChip=({g})=>{
+  if(!g.hudSeen.heat) return null;
+  const h=heatAt(g,g.loc), d=h.next-g.fedHeat;
+  const col=d<0?C.green:d>0?C.orange:C.dim;
+  return(<div style={{...bx,padding:"5px 10px",fontFamily:ft,fontSize:11,fontWeight:"bold",
+    border:`1px solid ${col}44`,color:col}}>
+    🔮{d>0?"+":""}{d}<span style={{color:C.dim,fontSize:8,fontWeight:"normal"}}> next{h.floor>0?" ◆ floor "+h.floor:""}</span>
+  </div>);
+};
+
+// ── THE LAUNDROMAT — clean money is safe and illiquid ──
+const LaunderPanel=({g,act})=>{
+  const chans=LAUNDER_CHANNELS.filter(c=>c.need(g));
+  return(<div style={{...bx,marginBottom:8,border:`1px solid ${C.gold}33`}}>
+    <div style={{fontFamily:ft,fontSize:8.5,letterSpacing:2,color:C.gold,marginBottom:4}}>◆ THE LAUNDROMAT</div>
+    <div style={{fontFamily:fb,fontSize:10.5,fontStyle:"italic",color:C.dim,marginBottom:7,lineHeight:1.4}}>
+      Clean money cannot buy product and cannot be seized. Dirty money buys everything and belongs to
+      whoever can prove it is yours. Caps reset every move.</div>
+    {chans.map(ch=>{
+      const room=launderCap(g,ch);
+      const amt=Math.min(g.cash,room);
+      const clean=Math.floor(amt*(1-ch.fee));
+      return(<div key={ch.id} style={{...bx,padding:"7px 9px",marginBottom:6}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:6}}>
+          <span style={{fontFamily:ft,fontSize:11,fontWeight:"bold",color:C.gold}}>{ch.icon} {ch.name}</span>
+          <span style={{fontFamily:ft,fontSize:8.5,color:C.dim,textAlign:"right"}}>
+            {Math.round(ch.fee*100)}% fee ◆ {FM(room)} left{ch.risk?` ◆ ${Math.round(ch.risk*100)}% trail`:""}</span>
+        </div>
+        <div style={{fontFamily:fb,fontSize:10.5,fontStyle:"italic",color:C.dim,margin:"3px 0 6px",lineHeight:1.35}}>{ch.desc}</div>
+        <button style={{...bt(C.gold),width:"100%",padding:"8px",fontSize:11}} disabled={amt<500}
+          onClick={()=>act(processLaunder,ch.id,amt)}>WASH {FM(amt)} ▸ ✨ {FM(clean)}</button>
+      </div>);})}
+  </div>);
+};
+
+// ── RIVAL DOSSIER — the whole-game opponent, visible at all times ──
+const RivalDossier=({g,act})=>{
+  const r=g.rival||initRival();
+  const cols=(g.colTurf||[]).filter(Boolean).length;
+  if(r.broken) return(<div style={{...bx,marginBottom:8,border:`1px solid ${C.gold}55`,
+    fontFamily:ft,fontSize:10.5,color:C.gold}}>
+    👑 EL COLOMBIANO IS FINISHED. The corners answer to you now.</div>);
+  const awake=(g.currentEra||0)>=1||(g.totalProfit||0)>=20000;
+  const mine=strengthOf(g), his=Math.round(r.power);
+  const next=r.power>=22?34:r.power>=13?22:13;
+  return(<div style={{...bx,marginBottom:8,border:`1px solid ${C.orange}55`}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:5}}>
+      <span style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:C.orange}}>◆ THE RIVAL — EL COLOMBIANO</span>
+      <span style={{fontFamily:ft,fontSize:9,color:r.truce>0?C.green:C.dim}}>
+        {r.truce>=900?"PERMANENT PEACE":r.truce>0?`TRUCE ${r.truce}`:awake?"ACTIVE":"DORMANT"}</span>
+    </div>
+    <div style={{display:"flex",gap:8,marginBottom:6}}>
+      <div style={{flex:1}}>
+        <div style={{fontFamily:ft,fontSize:9,color:C.dim,marginBottom:2}}>YOUR STRENGTH {mine}</div>
+        <Bar v={mine} max={Math.max(40,his,mine)} color={mine>=his?C.green:C.blue} h={5}/>
+      </div>
+      <div style={{flex:1}}>
+        <div style={{fontFamily:ft,fontSize:9,color:C.dim,marginBottom:2}}>HIS POWER {his}</div>
+        <Bar v={his} max={Math.max(40,his,mine)} color={C.orange} h={5}/>
+      </div>
+    </div>
+    <div style={{fontFamily:fb,fontSize:11,fontStyle:"italic",color:C.text,marginBottom:5,lineHeight:1.4}}>
+      {r.lastText} {cols>0?`He holds ${cols} district${cols>1?"s":""}.`:""}
+      {r.raids>0?` ${r.raids} raid${r.raids>1?"s":""} on your blocks so far.`:""}
+    </div>
+    <div style={{fontFamily:ft,fontSize:8.5,color:C.dim,marginBottom:6}}>
+      NEXT CONFRONTATION AT POWER {next} ◆ crews, guns, cred and districts all count toward your strength</div>
+    <button style={{...bt(C.pink),width:"100%",padding:"8px",fontSize:11}}
+      disabled={g.cash<6000||g.cred<25||!awake}
+      onClick={()=>act(processSabotage)}>
+      🔥 BURN A STASH HOUSE — $6,000 {g.cred<25?"(NEEDS 25 CRED)":"◆ −3 his power, or he learns your name"}</button>
+  </div>);
+};
+
+// ── STREET OPERATIONS — informants and crew loyalty, per district ──
+const DistrictOps=({g,act})=>{
+  const rows=LOCS.map((l,i)=>({l,i,pat:(g.patrols||[])[i]||0,inf:(g.informants||[])[i]||0,
+    loy:(((g.enfLoyalty||[])[i])??100),enf:(g.enforcers||[])[i]||0}))
+    .filter(r=>r.inf>=1||r.enf>0);
+  if(!rows.length) return null;
+  return(<div style={{...bx,marginBottom:8,border:`1px solid ${C.blue}33`}}>
+    <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:C.blue,marginBottom:6}}>
+      ◆ STREET OPERATIONS — UNPAID CREWS DESERT, SNITCHES COMPOUND</div>
+    {rows.map(r=>{
+      const infCost=Math.floor(700+r.inf*1500+(g.totalProfit||0)*0.005);
+      const bonusCost=r.enf*900;
+      const here=g.loc===r.i;
+      return(<div key={r.l.name} style={{marginBottom:8,paddingBottom:7,borderBottom:`1px solid ${C.border}`}}>
+        <div style={{fontFamily:ft,fontSize:10.5,color:r.l.color,marginBottom:3}}>
+          {r.l.icon} {r.l.name}
+          <span style={{color:C.dim,fontSize:9}}> ◆ 🚔{r.pat.toFixed(1)}{r.inf>=1?` ◆ 🐀${r.inf.toFixed(1)}`:""}
+          {r.enf>0?` ◆ 👊${r.enf} at ${Math.round(r.loy)}%`:""}</span></div>
+        {r.enf>0&&<div style={{marginBottom:5}}>
+          <Bar v={r.loy} color={r.loy>=60?C.green:r.loy>=35?C.orange:C.pink} h={3}/></div>}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {r.inf>=1&&here&&<button style={{...bt(C.blue),flex:1,padding:"7px",fontSize:10}}
+            disabled={g.cash<infCost} onClick={()=>act(processPayInformant,r.i)}>
+            🤐 BUY SILENCE — {FM(infCost)}</button>}
+          {r.inf>=1&&here&&<button style={{...bt(C.pink),flex:1,padding:"7px",fontSize:10}}
+            onClick={()=>act(processLeanOnInformant,r.i)}>👊 LEAN ON HIM</button>}
+          {r.inf>=1&&!here&&<div style={{fontFamily:ft,fontSize:9,color:C.dim,padding:"6px 2px"}}>
+            travel there to deal with the snitch</div>}
+          {r.enf>0&&<button style={{...bt(C.gold),flex:1,padding:"7px",fontSize:10}}
+            disabled={g.cash<bonusCost||r.loy>=98} onClick={()=>act(processCrewBonus,r.i)}>
+            👊 PAY BONUS — {FM(bonusCost)}</button>}
+        </div>
+      </div>);})}
+  </div>);
+};
+
+// ── CONFRONTATION MODAL ──
+const WorldEventModal=({ev,g,onAct})=>(
+  <Modal onClose={()=>{}}>
+    <div style={{...bx,border:`1px solid ${ev.color}88`,padding:16,boxShadow:`0 0 30px ${ev.color}33`}}>
+      <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:ev.color,marginBottom:8}}>◆ {ev.header}</div>
+      <Neon color={ev.color} size={18}>{ev.icon} {ev.title}</Neon>
+      <div style={{fontFamily:fb,fontSize:14.5,fontStyle:"italic",lineHeight:1.55,color:C.text,margin:"10px 0 14px"}}>
+        {ev.text}</div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {ev.opts.map(o=>{
+          const broke=o.cost>0&&g.cash<o.cost;
+          return(<div key={o.id}>
+            <button disabled={broke} style={{...bt(o.color),width:"100%",opacity:broke?.45:1}}
+              onClick={()=>onAct(o)}>{o.label}</button>
+            <div style={{fontFamily:ft,fontSize:8.5,color:broke?C.pink:C.dim,margin:"4px 2px 0",lineHeight:1.35}}>
+              {broke?"NOT ENOUGH CASH — ":""}{o.note}</div>
+          </div>);})}
+      </div>
+    </div>
+  </Modal>
+);
+
 const HudChip=({icon,label,color,bar,pulse})=>(
   <div style={{...bx,padding:"5px 10px",display:"flex",flexDirection:"column",gap:3,border:`1px solid ${color}44`,animation:pulse?"hudPing .6s ease, hudPulse 1.2s .6s infinite":"hudPing .6s ease"}}>
     <div style={{display:"flex",alignItems:"center",gap:5,fontFamily:ft,fontSize:12,fontWeight:"bold",color}}>
@@ -3575,15 +6101,18 @@ const BankTab=({g,act,meta,onEscape,markCoach})=>{
       <Bar v={liquid} max={40000} color={liquid>=40000?C.green:C.blue}/>
       {liquid>=40000&&<div style={{fontFamily:ft,fontSize:9,color:C.green,marginTop:4}}>✓ THE FORGER WILL TAKE YOUR CALL</div>}
     </div>);})()}
+    <LaunderPanel g={g} act={act}/>
     <button style={{...bt(C.blue),width:"100%"}} onClick={onEscape}>🛫 EXPLORE ESCAPE ROUTES</button>
   </div>);
 };
 
 // ── EMPIRE ──
-const EmpireTab=({g,act})=>(
+const EmpireTab=({g,act,setMini})=>(
   <div>
     <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:C.dim,marginBottom:8}}>
       ◆ TURF PAYS EVERY MOVE — ENFORCERS HOLD IT (−{FM(ENFORCER_UPKEEP)}/move each)</div>
+    <RivalDossier g={g} act={act}/>
+    <DistrictOps g={g} act={act}/>
     {(g.colTurf||[]).some(Boolean)&&<div style={{...bx,marginBottom:8,border:`1px solid ${C.orange}55`,fontFamily:ft,fontSize:10,color:C.text}}>
       🇨🇴 <b style={{color:C.orange}}>EL COLOMBIANO</b> holds {(g.colTurf||[]).filter(Boolean).length} district{(g.colTurf||[]).filter(Boolean).length>1?"s":""}.{g.storyFlags.col_peace?" The peace holds — attacking breaks it.":" His crews undercut your sales there −12%."}</div>}
     {LOCS.map((l,i)=>{
