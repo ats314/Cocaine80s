@@ -2121,10 +2121,17 @@ function processTravel(s,destLoc){
         npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+3,0,20);
       } else {
         const dq=d.rivalBought?Math.ceil(d.qty/2):d.qty;
-        dealInvAdd={idx:d.drugIdx,qty:dq};
-        evtMsg=`📦 Shipment landed. ${dq}× ${DRUGS[d.drugIdx].name} in your bag. Street value ~${FM(dq*np[d.drugIdx])}.`;
-        effects.push({type:"SFX",name:"pager"},{type:"SPAWN",text:`+${dq} ${DRUGS[d.drugIdx].emoji}`,color:C.gold,y:.45},
-          {type:"DEAL_SCENE",data:{kind:"shipment",emoji:DRUGS[d.drugIdx].emoji,qty:dq,cash:0}});
+        // Every other inventory add is clamped to coatSp; this one was not, so
+        // a shipment landing into a full bag pushed it past capacity (126/100).
+        const dealRoom=Math.max(0,(s.coatSp||0)-s.inv.reduce((a,b)=>a+b,0));
+        const landed=Math.min(dq,dealRoom), spilled=dq-landed;
+        // The deal was paid for up front, so it carries a real cost basis.
+        // Landing it at avgCost 0 booked the entire sale as profit, which also
+        // permanently raised the heat floor via totalProfit.
+        dealInvAdd={idx:d.drugIdx,qty:landed,unit:Math.round(d.cost/Math.max(1,d.qty))};
+        evtMsg=`📦 Shipment landed. ${landed}× ${DRUGS[d.drugIdx].name} in your bag. Street value ~${FM(landed*np[d.drugIdx])}.${spilled>0?` No room for ${spilled} — left in the boat.`:""}`;
+        effects.push({type:"SFX",name:"pager"},{type:"SPAWN",text:`+${landed} ${DRUGS[d.drugIdx].emoji}`,color:C.gold,y:.45},
+          {type:"DEAL_SCENE",data:{kind:"shipment",emoji:DRUGS[d.drugIdx].emoji,qty:landed,cash:0}});
         activeDeal=null;
       }
     }
@@ -2220,6 +2227,14 @@ function processTravel(s,destLoc){
     stashInv:zeroStash?Array(DRUG_COUNT).fill(0):s.stashInv,
     inv:(()=>{let iv=dealInvAdd?s.inv.map((q,i)=>i===dealInvAdd.idx?q+dealInvAdd.qty:q):s.inv;
       if(hurricaneLoss) iv=iv.map(q=>q-Math.ceil(q*0.3)); return iv;})(),
+    // Blend the shipment's real unit cost into the running average, otherwise
+    // selling it books 100% profit against a zero basis.
+    avgCost:(()=>{
+      if(!dealInvAdd||dealInvAdd.qty<=0) return s.avgCost;
+      const i=dealInvAdd.idx, had=s.inv[i]||0, add=dealInvAdd.qty, tot=had+add;
+      if(tot<=0) return s.avgCost;
+      const blended=((had*(s.avgCost[i]||0))+(add*(dealInvAdd.unit||0)))/tot;
+      return s.avgCost.map((v,k)=>k===i?blended:v);})(),
     dealsSinceStory:(s.dealsSinceStory||0),
     rivals:s.rivals.map(v=>({...v,loc:Math.random()<.3?R(0,5):v.loc})),
   };
@@ -4451,8 +4466,11 @@ const MiniShell=({title,desc,color,children,onAuto})=>(
       <div style={{fontFamily:fb,fontSize:12,fontStyle:"italic",color:C.dim,textAlign:"center",marginBottom:12}}>{desc}</div>
       {children}
       <div style={{textAlign:"center",marginTop:12}}>
-        <span onClick={onAuto} style={{fontFamily:ft,fontSize:9,letterSpacing:1,color:C.dim,
-          textDecoration:"underline",cursor:"pointer"}}>AUTO-RESOLVE INSTEAD</span>
+        {/* A real button: the span was a ~9px tap target on a 420px phone,
+            unreachable by keyboard and invisible to assistive tech. */}
+        <button onClick={onAuto} style={{fontFamily:ft,fontSize:10,letterSpacing:1,color:C.dim,
+          textDecoration:"underline",cursor:"pointer",background:"none",border:"none",
+          padding:"10px 16px",minHeight:44,touchAction:"manipulation"}}>AUTO-RESOLVE INSTEAD</button>
       </div>
     </div>
   </div>
@@ -5433,7 +5451,7 @@ export default function Cocaine80s(){
       spawnFly(CL(Math.ceil(n/4),3,6),{from:exch(cashRef),to:sc,spread:24});
     } };
   const doSell=()=>{ const i=selDrug; const n=qty==="max"?g.inv[i]:Math.min(qty,g.inv[i]);
-    if(act(processSell,i,n)){ markCoach("sell_here"); markCoach("heat_warn");
+    if(act(processSell,i,n)){ markCoach("sell_here");
       const sc=exch(sheetRef)||{x:(typeof window!=="undefined"?window.innerWidth:400)/2,y:420};
       spawnFly(CL(Math.ceil(n/2),3,9),{emoji:DRUGS[i].emoji,from:sc,
         to:{x:(typeof window!=="undefined"?window.innerWidth:400)+70,y:sc.y-40},spread:90,fade:true});
@@ -5553,6 +5571,10 @@ export default function Cocaine80s(){
       :selDrug!=null&&mode==="buy"&&!g.coach.buy_low?"buy_low"
       :tab==="market"&&used>0&&!g.coach.travel_tip&&selDrug==null?"travel_tip"
       :tab==="market"&&!g.coach.sell_here&&selDrug==null&&g.inv.some((q,i)=>q>0&&g.prices[i]>g.avgCost[i]&&g.avgCost[i]>0)?"sell_here"
+      // heat_warn was marked seen on every sell but never listed here, so the
+      // game's only heat tutorial could never render. Show it once heat is
+      // actually visible to the player (the HUD reveals it at 5).
+      :tab==="market"&&!g.coach.heat_warn&&selDrug==null&&g.fedHeat>=8?"heat_warn"
       :null);
   const TABS=[["market","💊"],["travel","🗺"],["bank","🏦"],["empire","👑"],["contacts","📇"],["life","🕶"]];
 
@@ -5625,6 +5647,7 @@ export default function Cocaine80s(){
       <div style={{padding:"0 12px",position:"relative"}}>
         {coachKey==="tap_drug"&&<CoachMark k="tap_drug" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
         {coachKey==="sell_here"&&<CoachMark k="sell_here" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
+        {coachKey==="heat_warn"&&<CoachMark k="heat_warn" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
 
         {tab==="market"&&<div>
           <MarketWire g={g}/>
@@ -5657,7 +5680,7 @@ export default function Cocaine80s(){
                       spawnFly(CL(Math.ceil(g.inv[i]/2)||3,3,8),{emoji:DRUGS[i].emoji,from,
                         to:{x:(typeof window!=="undefined"?window.innerWidth:400)+70,y:from.y-30},spread:60,fade:true});
                     }
-                    markCoach("sell_here");markCoach("heat_warn");}}
+                    markCoach("sell_here");}}
                   style={{fontFamily:ft,fontSize:10,fontWeight:"bold",padding:"4px 8px",borderRadius:10,cursor:"pointer",
                   background:C.green+"22",color:C.green,border:`1px solid ${C.green}66`,boxShadow:`0 0 10px ${C.green}33`}}>
                   💰SELL ×{owned}</span>
@@ -5763,7 +5786,7 @@ export default function Cocaine80s(){
         {coachKey==="travel_tip"&&<CoachMark k="travel_tip" style={{top:-30,left:"14%"}}/>}
         {TABS.map(([k,icon])=>{
           const on=unlocks[k];
-          return(<button key={k} disabled={!on} onClick={()=>{ setTab(k); setSelDrug(null); if(k==="bank")markCoach("debt_tip"); if(k==="travel")markCoach("travel_tip"); if(meta.sound)SFX.click(); }}
+          return(<button key={k} disabled={!on} onClick={()=>{ if(tab==="bank"&&k!=="bank")markCoach("debt_tip"); setTab(k); setSelDrug(null); if(k==="travel"){markCoach("travel_tip"); if(coachKey==="heat_warn")markCoach("heat_warn");} if(meta.sound)SFX.click(); }}
             style={{flex:1,background:"none",border:"none",cursor:on?"pointer":"default",opacity:on?1:.25,padding:"4px 0"}}>
             <div style={{fontSize:17,filter:tab===k?`drop-shadow(0 0 6px ${loc.color})`:"grayscale(.6)"}}>{on?icon:"🔒"}</div>
             <div style={{fontFamily:ft,fontSize:7.5,letterSpacing:1,color:tab===k?loc.color:C.dim,fontWeight:tab===k?"bold":"normal"}}>{k.toUpperCase()}</div>
