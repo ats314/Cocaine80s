@@ -1493,6 +1493,480 @@ const SFX={
   error:()=>tone(160,.15,"sawtooth",.06),
   type:()=>tone(1200+Math.random()*400,.015,"square",.018),
 };
+// ═══════════════════════════════════════════════════════════════
+// NEON NOIR AUDIO ENGINE v2 — everything synthesized, zero assets
+// ═══════════════════════════════════════════════════════════════
+// Bus layout (built lazily, once, on the first sound after a gesture):
+//
+//   one-shot voices ──> sfxBus ──┬─────────────────────────────┐
+//                                └─> sfxSend ─> convolver ─┐   │
+//   music voices ─> mFilt ─> mLvl ─> mDuck ──┬─────────────┼──>│─> master ─> limiter ─> out
+//                   (tension sweep)          └─> mSend ────┘   │
+//
+// The convolver runs a procedurally generated impulse response (no files).
+// Every one-shot node disconnects itself in onended, so nothing ever leaks.
+
+const mtof=m=>440*Math.pow(2,(m-69)/12);
+
+const AUDIO=(()=>{
+  let G=null, muted=false, hidden=false;
+
+  const mkNoise=a=>{
+    const n=Math.floor(a.sampleRate*2), b=a.createBuffer(1,n,a.sampleRate), d=b.getChannelData(0);
+    for(let i=0;i<n;i++) d[i]=Math.random()*2-1;
+    return b;
+  };
+  // Procedural impulse response: a few early reflections + exponential tail.
+  const mkIR=(a,sec,decay)=>{
+    const n=Math.max(8,Math.floor(a.sampleRate*sec)), b=a.createBuffer(2,n,a.sampleRate);
+    for(let c=0;c<2;c++){
+      const d=b.getChannelData(c);
+      for(let i=0;i<n;i++){ const t=i/n; d[i]=(Math.random()*2-1)*Math.pow(1-t,decay)*(1-t*0.12); }
+      d[Math.floor(n*0.011)]+=c?0.50:-0.55;
+      d[Math.floor(n*0.026)]+=c?-0.38:0.34;
+      d[Math.floor(n*0.049)]+=c?0.22:0.25;
+    }
+    return b;
+  };
+
+  const g=()=>{
+    const a=ctx(); if(!a) return null;
+    if(G&&G.a===a) return G;
+    const master=a.createGain(); master.gain.value=muted?0.0001:0.85;
+    const lim=a.createDynamicsCompressor();
+    lim.threshold.value=-9; lim.knee.value=14; lim.ratio.value=9;
+    lim.attack.value=0.004; lim.release.value=0.2;
+    master.connect(lim); lim.connect(a.destination);
+
+    const verb=a.createConvolver(); verb.normalize=true; verb.buffer=mkIR(a,2.6,2.4);
+    const verbLvl=a.createGain(); verbLvl.gain.value=0.9;
+    verb.connect(verbLvl); verbLvl.connect(master);
+
+    const sfx=a.createGain(); sfx.gain.value=0.85;
+    const sfxSend=a.createGain(); sfxSend.gain.value=0.18;
+    sfx.connect(master); sfx.connect(sfxSend); sfxSend.connect(verb);
+
+    const mFilt=a.createBiquadFilter(); mFilt.type="lowpass"; mFilt.frequency.value=3600; mFilt.Q.value=0.8;
+    const mLvl=a.createGain(); mLvl.gain.value=0.0001;
+    const mDuck=a.createGain(); mDuck.gain.value=1;
+    const mSend=a.createGain(); mSend.gain.value=0.30;
+    mFilt.connect(mLvl); mLvl.connect(mDuck); mDuck.connect(master);
+    mDuck.connect(mSend); mSend.connect(verb);
+
+    G={a,master,lim,verb,verbLvl,sfx,sfxSend,mFilt,mLvl,mDuck,mSend,noise:mkNoise(a)};
+    return G;
+  };
+
+  const now=()=>{ const b=g(); return b?b.a.currentTime:0; };
+  const dead=(...n)=>{ n.forEach(x=>{ try{ x.disconnect(); }catch(e){} }); };
+
+  // ── primitive voices ─────────────────────────────────────────
+  const osc=(type,freq,when,dur,peak,dest,detune,slideTo)=>{
+    const b=g(); if(!b) return null;
+    const a=b.a, o=a.createOscillator(), gn=a.createGain();
+    o.type=type; o.frequency.setValueAtTime(Math.max(20,freq),when);
+    if(slideTo) o.frequency.exponentialRampToValueAtTime(Math.max(20,slideTo),when+dur);
+    if(detune) o.detune.setValueAtTime(detune,when);
+    gn.gain.setValueAtTime(0.0001,when);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,peak),when+0.008);
+    gn.gain.exponentialRampToValueAtTime(0.0001,when+dur);
+    o.connect(gn); gn.connect(dest||b.sfx);
+    o.start(when); o.stop(when+dur+0.03);
+    o.onended=()=>dead(o,gn);
+    return o;
+  };
+  const noise=(when,dur,peak,type,freq,Q,dest,sweepTo)=>{
+    const b=g(); if(!b) return null;
+    const a=b.a, s=a.createBufferSource(); s.buffer=b.noise; s.loop=true;
+    s.playbackRate.value=0.85+Math.random()*0.4;
+    const f=a.createBiquadFilter(); f.type=type||"bandpass"; f.Q.value=Q||1;
+    f.frequency.setValueAtTime(Math.max(30,freq),when);
+    if(sweepTo) f.frequency.exponentialRampToValueAtTime(Math.max(30,sweepTo),when+dur);
+    const gn=a.createGain();
+    gn.gain.setValueAtTime(0.0001,when);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,peak),when+0.005);
+    gn.gain.exponentialRampToValueAtTime(0.0001,when+dur);
+    s.connect(f); f.connect(gn); gn.connect(dest||b.sfx);
+    s.start(when,Math.random()*1.2); s.stop(when+dur+0.03);
+    s.onended=()=>dead(s,f,gn);
+    return s;
+  };
+  // plucked/filtered synth note — the workhorse for arps, stabs and SFX melody
+  const pluck=(when,freq,dur,peak,type,dest,cutMul)=>{
+    const b=g(); if(!b) return;
+    const a=b.a, o=a.createOscillator(), f=a.createBiquadFilter(), gn=a.createGain();
+    o.type=type||"square"; o.frequency.setValueAtTime(Math.max(20,freq),when);
+    f.type="lowpass"; f.Q.value=4;
+    f.frequency.setValueAtTime(Math.min(12000,freq*(cutMul||9)+200),when);
+    f.frequency.exponentialRampToValueAtTime(Math.max(160,freq*1.5),when+dur);
+    gn.gain.setValueAtTime(0.0001,when);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,peak),when+0.006);
+    gn.gain.exponentialRampToValueAtTime(0.0001,when+dur);
+    o.connect(f); f.connect(gn); gn.connect(dest||b.sfx);
+    o.start(when); o.stop(when+dur+0.03);
+    o.onended=()=>dead(o,f,gn);
+  };
+  // fat detuned bass with its own filter envelope + clean sub
+  const bass=(when,freq,dur,peak,dest,bright)=>{
+    const b=g(); if(!b) return;
+    const a=b.a, o1=a.createOscillator(), o2=a.createOscillator(), sub=a.createOscillator();
+    const f=a.createBiquadFilter(), gn=a.createGain();
+    o1.type="sawtooth"; o2.type="sawtooth"; sub.type="sine";
+    o1.frequency.setValueAtTime(freq,when);
+    o2.frequency.setValueAtTime(freq,when); o2.detune.setValueAtTime(-12,when);
+    sub.frequency.setValueAtTime(freq/2,when);
+    f.type="lowpass"; f.Q.value=7;
+    f.frequency.setValueAtTime(Math.min(7000,freq*(bright||7)+140),when);
+    f.frequency.exponentialRampToValueAtTime(Math.max(100,freq*1.7),when+Math.min(0.32,dur));
+    gn.gain.setValueAtTime(0.0001,when);
+    gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,peak),when+0.012);
+    gn.gain.setValueAtTime(Math.max(0.0002,peak),when+Math.max(0.03,dur*0.55));
+    gn.gain.exponentialRampToValueAtTime(0.0001,when+dur);
+    o1.connect(f); o2.connect(f); f.connect(gn);
+    const sg=a.createGain(); sg.gain.value=0.85; sub.connect(sg); sg.connect(gn);
+    gn.connect(dest||b.sfx);
+    o1.start(when); o2.start(when); sub.start(when);
+    o1.stop(when+dur+0.05); o2.stop(when+dur+0.05); sub.stop(when+dur+0.05);
+    sub.onended=()=>dead(o1,o2,sub,sg,f,gn);
+  };
+  // inharmonic bell — used for coins, chimes, achievements
+  const bell=(when,freq,dur,peak,dest)=>{
+    osc("sine",freq,when,dur,peak,dest);
+    osc("sine",freq*2.76,when,dur*0.55,peak*0.32,dest);
+    osc("sine",freq*5.40,when,dur*0.30,peak*0.14,dest);
+  };
+
+  // ── drum kit ─────────────────────────────────────────────────
+  const DRUM={
+    kick(when,vel,dest){
+      const b=g(); if(!b) return; const a=b.a;
+      const o=a.createOscillator(), gn=a.createGain();
+      o.type="sine";
+      o.frequency.setValueAtTime(150,when);
+      o.frequency.exponentialRampToValueAtTime(44,when+0.09);
+      gn.gain.setValueAtTime(0.0001,when);
+      gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,vel),when+0.006);
+      gn.gain.exponentialRampToValueAtTime(0.0001,when+0.30);
+      o.connect(gn); gn.connect(dest||b.sfx);
+      o.start(when); o.stop(when+0.34);
+      o.onended=()=>dead(o,gn);
+      noise(when,0.018,vel*0.30,"highpass",2400,0.7,dest);
+    },
+    snare(when,vel,dest){
+      const b=g(); if(!b) return; const a=b.a;
+      noise(when,0.15,vel*0.85,"bandpass",1750,0.9,dest);
+      noise(when,0.05,vel*0.45,"highpass",4400,0.7,dest);
+      const o=a.createOscillator(), gn=a.createGain();
+      o.type="triangle";
+      o.frequency.setValueAtTime(198,when);
+      o.frequency.exponentialRampToValueAtTime(148,when+0.09);
+      gn.gain.setValueAtTime(0.0001,when);
+      gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,vel*0.5),when+0.005);
+      gn.gain.exponentialRampToValueAtTime(0.0001,when+0.13);
+      o.connect(gn); gn.connect(dest||b.sfx);
+      o.start(when); o.stop(when+0.17);
+      o.onended=()=>dead(o,gn);
+    },
+    hat(when,vel,open,dest){ noise(when,open?0.20:0.035,vel,"highpass",open?6600:8400,0.6,dest); },
+    tom(when,freq,vel,dest){
+      const b=g(); if(!b) return; const a=b.a;
+      const o=a.createOscillator(), gn=a.createGain();
+      o.type="sine";
+      o.frequency.setValueAtTime(freq,when);
+      o.frequency.exponentialRampToValueAtTime(Math.max(40,freq*0.55),when+0.28);
+      gn.gain.setValueAtTime(0.0001,when);
+      gn.gain.exponentialRampToValueAtTime(Math.max(0.0002,vel),when+0.008);
+      gn.gain.exponentialRampToValueAtTime(0.0001,when+0.34);
+      o.connect(gn); gn.connect(dest||b.sfx);
+      o.start(when); o.stop(when+0.38);
+      o.onended=()=>dead(o,gn);
+      noise(when,0.05,vel*0.25,"bandpass",freq*3,1.4,dest);
+    },
+    clap(when,vel,dest){ for(let i=0;i<3;i++) noise(when+i*0.013,0.085+i*0.035,vel*(1-i*0.22),"bandpass",1150+i*200,1.6,dest); },
+    rim(when,vel,dest){ noise(when,0.028,vel,"bandpass",2700,4,dest); },
+    crash(when,vel,dest){ noise(when,1.35,vel,"highpass",5200,0.5,dest); noise(when,0.9,vel*0.6,"bandpass",9000,0.4,dest); },
+  };
+
+  return {
+    g, now, osc, noise, pluck, bass, bell, DRUM, dead,
+    // peek() never calls ctx(), so the scheduler cannot accidentally
+    // resume a context we deliberately suspended when the tab went away.
+    peek:()=>G,
+    isMuted:()=>muted,
+    // Mute is a gain ramp, not a teardown — the transport keeps its phase.
+    setMuted(m){
+      muted=!!m; const b=G;
+      if(!b) return;
+      const t=b.a.currentTime;
+      b.master.gain.cancelScheduledValues(t);
+      b.master.gain.setValueAtTime(Math.max(0.0001,b.master.gain.value),t);
+      b.master.gain.exponentialRampToValueAtTime(muted?0.0001:0.85,t+0.25);
+    },
+    // Tab hidden -> suspend the whole context (stops all CPU + scheduling drift).
+    setHidden(h){
+      hidden=!!h; const a=AC; if(!a) return;
+      try{ if(hidden) a.suspend(); else if(!muted) a.resume(); }catch(e){}
+    },
+    // Call from a real user gesture. Safe to call many times.
+    unlock(){
+      const b=g(); if(!b) return;
+      try{ if(b.a.state!=="running") b.a.resume(); }catch(e){}
+    },
+  };
+})();
+
+// ═══════════════════════════════════════════════════════════════
+// ADAPTIVE SYNTHWAVE SOUNDTRACK
+// ═══════════════════════════════════════════════════════════════
+// Lookahead scheduler (25ms timer, 120ms horizon) => sample-accurate,
+// seamless looping. Mood is re-read from the game every bar, so heat /
+// era / night / district changes glide in without restarting anything.
+
+const MUSIC=(()=>{
+  // [root midi, chord intervals] x 4 bars, one progression per era
+  const PROGS=[
+    [[45,[0,3,7,10]],[41,[0,4,7,11]],[48,[0,4,7,11]],[43,[0,4,7,9]]],   // Paradise  — Am7 Fmaj7 Cmaj7 G6
+    [[38,[0,3,7,10]],[46,[0,4,7,11]],[43,[0,4,7,10]],[45,[0,4,7,10]]],  // Anti-Drug — Dm7 Bb^7 G7 A7
+    [[36,[0,3,7,10]],[44,[0,4,7,11]],[39,[0,4,7,11]],[46,[0,4,7,10]]],  // Crack     — Cm7 Ab^7 Eb^7 Bb7
+    [[42,[0,3,7,10]],[38,[0,4,7,9]],[37,[0,3,7,10]],[44,[0,4,7,10]]],   // War       — F#m7 D6 C#m7 Ab7
+    [[40,[0,3,7,10]],[36,[0,3,6,10]],[44,[0,4,7,10]],[35,[0,3,7,11]]],  // Endgame   — Em7 Cdim Ab7 Bm^7
+  ];
+  // 16-step patterns, indexed by intensity 0..3
+  const KICKS=[
+    [1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0],
+    [1,0,0,0, 0,0,1,0, 1,0,0,0, 0,0,1,0],
+    [1,0,0,1, 0,0,1,0, 1,0,0,1, 0,0,1,0],
+    [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,1],
+  ];
+  const SNARES=[
+    [0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0],
+    [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],
+    [0,0,0,0, 1,0,0,0, 0,0,1,0, 1,0,0,0],
+    [0,0,0,0, 1,0,0,1, 0,0,0,0, 1,0,1,0],
+  ];
+  const HATS=[
+    [0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,0],
+    [0,0,1,0, 0,0,1,0, 0,0,1,0, 0,0,1,1],
+    [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0],
+    [1,1,1,1, 1,1,1,1, 1,1,1,1, 1,1,1,1],
+  ];
+  // bass rhythm: index into chord tones, -1 = rest
+  const BASSES=[
+    [0,-1,-1,-1, -1,-1,-1,-1, 0,-1,-1,-1, -1,-1,-1,-1],
+    [0,-1,-1,0, -1,-1,2,-1, 0,-1,-1,0, -1,-1,1,-1],
+    [0,-1,0,-1, 2,-1,0,-1, 0,-1,0,-1, 3,-1,2,-1],
+    [0,0,-1,0, 2,0,-1,0, 0,0,-1,3, 2,0,3,2],
+  ];
+  // per-district accent: which step it lands on, semitone offset, waveform
+  const DISTRICT=[
+    {step:6, off:24, wave:"triangle", gain:0.030},  // Miami Beach   — glitter
+    {step:10,off:12, wave:"square",   gain:0.026},  // Little Havana — clave stab
+    {step:5, off:-12,wave:"sawtooth", gain:0.032},  // Overtown      — low menace
+    {step:14,off:19, wave:"sine",     gain:0.028},  // Coral Gables  — soft chime
+    {step:3, off:19, wave:"square",   gain:0.022},  // Ft Lauderdale — party blip
+    {step:12,off:7,  wave:"sine",     gain:0.030},  // The Keys      — tide swell
+  ];
+
+  const DRUM=AUDIO.DRUM, bass=AUDIO.bass;
+  let T=null;                       // transport, null when stopped
+  const LOOK=0.12, TICK=25;
+
+  const readMood=()=>{
+    let m={};
+    try{ m=(T&&T.getMood?T.getMood():null)||{}; }catch(e){ m={}; }
+    const era=Math.max(0,Math.min(PROGS.length-1,m.era||0));
+    const heat=Math.max(0,Math.min(100,m.heat||0));
+    const move=m.move||0;
+    const title=m.scene==="title";
+    let lvl=title?0:heat>=70?3:heat>=45?2:heat>=20?1:0;
+    if(!title&&era>=3) lvl=Math.min(3,lvl+1);
+    if(!title&&m.move!=null&&move<6) lvl=Math.min(lvl,1);   // calm opening minutes
+    if(!title&&m.deals!=null&&m.deals===0) lvl=0;
+    return {
+      era, heat, lvl, title,
+      loc:Math.max(0,Math.min(DISTRICT.length-1,m.loc||0)),
+      night:title?true:!!m.night,
+      bpm:title?76:(90+heat*0.26+era*2.5+(m.night?-6:2)),
+    };
+  };
+
+  const stepDur=()=>60/Math.max(50,T?T.bpm:96)/4;
+
+  const setTension=(b,mood)=>{
+    const t=b.a.currentTime;
+    // Tension closes the room down: bright and open when clean, choked when hunted.
+    const cut=mood.title?1500:5200-(mood.heat/100)*3500-(mood.night?500:0);
+    b.mFilt.frequency.setTargetAtTime(Math.max(600,cut),t,0.7);
+    b.mFilt.Q.setTargetAtTime(0.8+(mood.heat/100)*3.2,t,0.7);
+    b.mSend.gain.setTargetAtTime(mood.night?0.42:0.26,t,0.9);
+  };
+
+  const schedule=(b,step,t,mood)=>{
+    const bar=Math.floor(step/16)%4, i=step%16;
+    const prog=PROGS[mood.era], ch=prog[bar];
+    const root=ch[0], tones=ch[1];
+    const L=mood.lvl;
+    const swing=(i%2===1)?stepDur()*(mood.night?0.10:0.06):0;
+    const t2=t+swing;
+
+    // ── drums ──
+    if(!mood.title||i===0){
+      if(KICKS[L][i]) DRUM.kick(t,mood.title?0.28:0.60-(i?0.12:0),b.mFilt);
+    }
+    if(!mood.title){
+      if(SNARES[L][i]) (L>=2?DRUM.clap:DRUM.snare)(t2,0.30,b.mFilt);
+      if(HATS[L][i]) DRUM.hat(t2,L>=3&&i===14?0.10:0.055,L>=3&&i===14,b.mFilt);
+      if(L>=2&&i===15) DRUM.rim(t2,0.07,b.mFilt);
+      if(L>=3&&i===8) DRUM.tom(t,mtof(root+12),0.16,b.mFilt);
+    }
+
+    // ── bass ──
+    const bi=BASSES[L][i];
+    if(bi>=0&&!mood.title){
+      const n=root+tones[Math.min(bi,tones.length-1)];
+      bass(t,mtof(n),stepDur()*(L>=2?1.5:2.6),0.17+L*0.012,b.mFilt,5+L*1.5);
+    }else if(mood.title&&i===0){
+      bass(t,mtof(root),stepDur()*12,0.13,b.mFilt,3.5);
+    }
+
+    // ── pad chord change on the downbeat ──
+    if(i===0) voicePad(b,root,tones,mood);
+
+    // ── arpeggio ──
+    if(L>=1&&!mood.title&&(i%2===(mood.night?1:0))){
+      const idx=(step>>1)%(tones.length+1);
+      const n=root+24+tones[idx%tones.length]+(idx>=tones.length?12:0);
+      pluckMusic(b,t2,mtof(n),stepDur()*1.6,0.030+L*0.006,mood.night?"triangle":"square");
+    }
+    // ── lead motif every other bar once things get real ──
+    if(L>=2&&i===0&&bar%2===1){
+      const seq=[0,7,10,12,10,7];
+      seq.forEach((s,k)=>pluckMusic(b,t+k*stepDur()*2,mtof(root+24+s),stepDur()*2.4,0.034,"sawtooth"));
+    }
+    // ── district accent ──
+    const d=DISTRICT[mood.loc];
+    if(!mood.title&&d&&i===d.step) pluckMusic(b,t2,mtof(root+d.off),stepDur()*2.2,d.gain,d.wave);
+    // ── heat siren shadow ──
+    if(L>=3&&i===12){
+      AUDIO.osc("sawtooth",mtof(root+27),t,stepDur()*3,0.022,b.mFilt,0,mtof(root+20));
+    }
+  };
+
+  const pluckMusic=(b,t,f,dur,peak,wave)=>AUDIO.pluck(t,f,dur,peak,wave,b.mFilt,7);
+
+  // Persistent pad: 4 detuned saws + slow filter LFO. Retuned, never rebuilt.
+  const buildPad=(b)=>{
+    const a=b.a;
+    const padFilt=a.createBiquadFilter(); padFilt.type="lowpass"; padFilt.frequency.value=1200; padFilt.Q.value=1.2;
+    const padGain=a.createGain(); padGain.gain.value=0.0001;
+    padFilt.connect(padGain); padGain.connect(b.mFilt);
+    const lfo=a.createOscillator(); lfo.type="sine"; lfo.frequency.value=0.07;
+    const lfoAmt=a.createGain(); lfoAmt.gain.value=520;
+    lfo.connect(lfoAmt); lfoAmt.connect(padFilt.frequency);
+    const vox=[];
+    for(let i=0;i<4;i++){
+      const o=a.createOscillator();
+      o.type=i===3?"triangle":"sawtooth";
+      o.frequency.value=220;
+      o.detune.value=(i-1.5)*8;
+      const vg=a.createGain(); vg.gain.value=i===3?0.20:0.13;
+      o.connect(vg); vg.connect(padFilt);
+      vox.push({o,vg});
+    }
+    const t=a.currentTime;
+    vox.forEach(v=>v.o.start(t)); lfo.start(t);
+    padGain.gain.setValueAtTime(0.0001,t);
+    padGain.gain.exponentialRampToValueAtTime(0.20,t+2.2);
+    return {padFilt,padGain,lfo,lfoAmt,vox};
+  };
+  const voicePad=(b,root,tones,mood)=>{
+    if(!T||!T.pad) return;
+    const t=b.a.currentTime, oct=mood.night?0:12;
+    T.pad.vox.forEach((v,i)=>{
+      const n=root+oct+tones[i%tones.length]+(i===3?12:0);
+      v.o.frequency.setTargetAtTime(mtof(n),t,0.30);
+    });
+    T.pad.padFilt.frequency.setTargetAtTime(mood.night?820:1500+mood.lvl*260,t,1.2);
+    T.pad.padGain.gain.setTargetAtTime(mood.title?0.26:0.20-mood.lvl*0.025,t,1.5);
+  };
+
+  const tick=()=>{
+    const b=AUDIO.peek(); if(!b||!T) return;
+    const a=b.a;
+    if(a.state!=="running") return;               // suspended tab: hold position
+    if(T.next<a.currentTime-0.4) T.next=a.currentTime+0.06;   // recover from throttling
+    let guard=0;
+    while(T.next<a.currentTime+LOOK&&guard++<64){
+      if(T.step%16===0){                          // re-read the game once per bar
+        const m=readMood();
+        T.mood=m; T.bpm=m.bpm; setTension(b,m);
+      }
+      schedule(b,T.step,T.next,T.mood);
+      T.next+=stepDur();
+      T.step++;
+    }
+  };
+
+  return {
+    running:()=>!!T,
+    root:()=>{
+      if(!T||!T.mood) return 45;
+      const p=PROGS[T.mood.era||0];
+      return p[Math.floor(T.step/16)%4][0];
+    },
+    chord:()=>{
+      if(!T||!T.mood) return [0,3,7,10];
+      const p=PROGS[T.mood.era||0];
+      return p[Math.floor(T.step/16)%4][1];
+    },
+    start(getMood,owner){
+      const b=AUDIO.g(); if(!b) return;
+      if(T){ T.getMood=getMood||T.getMood; T.owner=owner; return; }   // idempotent
+      const a=b.a;
+      T={ owner, getMood, step:0, next:a.currentTime+0.08, bpm:96, mood:null, pad:null, timer:null };
+      T.mood=readMood(); T.bpm=T.mood.bpm;
+      T.pad=buildPad(b);
+      setTension(b,T.mood);
+      const t=a.currentTime;
+      b.mLvl.gain.cancelScheduledValues(t);
+      b.mLvl.gain.setValueAtTime(0.0001,t);
+      b.mLvl.gain.exponentialRampToValueAtTime(0.55,t+1.4);
+      b.mDuck.gain.cancelScheduledValues(t); b.mDuck.gain.setValueAtTime(1,t);
+      T.timer=setInterval(tick,TICK);
+      tick();
+    },
+    // owner guard: a screen only stops the music it started, so React's
+    // cleanup/setup ordering can never leave two transports fighting.
+    stop(owner){
+      if(!T) return;
+      if(owner!==undefined&&T.owner!==owner) return;
+      const b=AUDIO.g(), pad=T.pad;
+      clearInterval(T.timer); T=null;
+      if(!b) return;
+      const t=b.a.currentTime;
+      b.mLvl.gain.cancelScheduledValues(t);
+      b.mLvl.gain.setValueAtTime(Math.max(0.0001,b.mLvl.gain.value),t);
+      b.mLvl.gain.exponentialRampToValueAtTime(0.0001,t+0.4);
+      if(pad){
+        pad.padGain.gain.cancelScheduledValues(t);
+        pad.padGain.gain.setValueAtTime(Math.max(0.0001,pad.padGain.gain.value),t);
+        pad.padGain.gain.exponentialRampToValueAtTime(0.0001,t+0.4);
+        pad.vox.forEach(v=>{ try{ v.o.stop(t+0.5); }catch(e){} v.o.onended=()=>AUDIO.dead(v.o,v.vg); });
+        try{ pad.lfo.stop(t+0.5); }catch(e){}
+        pad.lfo.onended=()=>AUDIO.dead(pad.lfo,pad.lfoAmt,pad.padFilt,pad.padGain);
+      }
+    },
+    // sidechain the bed under a loud SFX so dialogue/sales cut through
+    duck(amount,dur){
+      const b=AUDIO.g(); if(!b) return;
+      const t=b.a.currentTime, d=dur||0.6;
+      b.mDuck.gain.cancelScheduledValues(t);
+      b.mDuck.gain.setValueAtTime(b.mDuck.gain.value,t);
+      b.mDuck.gain.linearRampToValueAtTime(Math.max(0.05,1-(amount||0.4)),t+0.04);
+      b.mDuck.gain.linearRampToValueAtTime(1,t+d);
+    },
+  };
+})();
 // Tiny era-aware synth loop
 const SCALES=[[261,329,392,523],[246,311,392,466],[233,311,349,466],[220,277,349,440],[207,261,311,415]];
 class SynthLoop{
@@ -1526,6 +2000,151 @@ class SynthLoop{
 // ═══════════════════════════════════════════════════════════════
 // VIEW LAYER — styles, juice, portraits, scenes  (React/DOM only)
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// SFX v2 — musical one-shots, keyed to whatever chord the bed is on
+// ═══════════════════════════════════════════════════════════════
+// Every cue is built from the AUDIO primitives, lands on a chord tone of
+// the running soundtrack, and ducks the bed instead of fighting it.
+// SFX keeps its original keys so every existing { type:"SFX", name } effect
+// and every SFX.foo() call site keeps working untouched.
+
+const sfxKey=()=>MUSIC.root();
+const sfxNote=semi=>mtof(sfxKey()+semi);
+
+Object.assign(SFX,{
+  click(){ const t=AUDIO.now()+0.001;
+    AUDIO.noise(t,0.018,0.050,"bandpass",2600,2.2);
+    AUDIO.osc("sine",sfxNote(24),t,0.050,0.030);
+  },
+  type(){ const t=AUDIO.now()+0.001;
+    AUDIO.noise(t,0.012,0.020,"highpass",5200+Math.random()*1800,0.8);
+  },
+  error(){ const t=AUDIO.now()+0.001;
+    AUDIO.pluck(t,sfxNote(-11),0.22,0.085,"sawtooth",null,1.8);
+    AUDIO.pluck(t+0.006,sfxNote(-12),0.24,0.080,"sawtooth",null,1.6);
+    AUDIO.DRUM.rim(t,0.045);
+  },
+  buy(){ const t=AUDIO.now()+0.001;
+    AUDIO.pluck(t,sfxNote(19),0.14,0.075,"triangle",null,6);
+    AUDIO.pluck(t+0.070,sfxNote(12),0.20,0.070,"triangle",null,5);
+    AUDIO.noise(t,0.090,0.030,"bandpass",900,1.2,null,2600);
+    AUDIO.DRUM.kick(t,0.22);
+    MUSIC.duck(0.22,0.35);
+  },
+  sell(){ const t=AUDIO.now()+0.001;
+    AUDIO.pluck(t,sfxNote(12),0.13,0.075,"square",null,8);
+    AUDIO.pluck(t+0.075,sfxNote(19),0.22,0.080,"square",null,9);
+    AUDIO.bell(t+0.075,sfxNote(31),0.50,0.030);
+    AUDIO.DRUM.hat(t,0.050,false);
+    MUSIC.duck(0.25,0.45);
+  },
+  sellBig(){ const t=AUDIO.now()+0.001, c=MUSIC.chord();
+    [0,c[1],c[2],12].forEach((s,i)=>AUDIO.pluck(t+i*0.065,sfxNote(24+s),0.28,0.075,"square",null,9));
+    AUDIO.DRUM.kick(t,0.42); AUDIO.DRUM.hat(t+0.13,0.050,false);
+    AUDIO.bell(t+0.26,sfxNote(36),0.70,0.030);
+    MUSIC.duck(0.35,0.70);
+  },
+  sellHuge(){ const t=AUDIO.now()+0.001, c=MUSIC.chord();
+    [0,c[1],c[2],12,12+c[1]].forEach((s,i)=>AUDIO.pluck(t+i*0.062,sfxNote(24+s),0.30,0.080,"sawtooth",null,8));
+    AUDIO.DRUM.kick(t,0.50); AUDIO.DRUM.clap(t+0.31,0.26);
+    AUDIO.bell(t+0.33,sfxNote(43),1.00,0.036);
+    AUDIO.noise(t+0.30,0.90,0.045,"highpass",5400,0.5);
+    MUSIC.duck(0.50,1.10);
+  },
+  sellMassive(){ const t=AUDIO.now()+0.001, c=MUSIC.chord();
+    [0,c[1],c[2],12,12+c[1],12+c[2],24].forEach((s,i)=>
+      AUDIO.pluck(t+i*0.058,sfxNote(24+s),0.34,0.085,"sawtooth",null,9));
+    AUDIO.DRUM.kick(t,0.62); AUDIO.DRUM.kick(t+0.40,0.48);
+    AUDIO.DRUM.tom(t+0.20,sfxNote(-5),0.24); AUDIO.DRUM.tom(t+0.30,sfxNote(-12),0.24);
+    AUDIO.DRUM.crash(t+0.41,0.10);
+    [0,c[1],c[2],12].forEach(s=>AUDIO.osc("sawtooth",sfxNote(12+s),t+0.41,1.50,0.042,null,Math.random()*10-5));
+    AUDIO.bell(t+0.44,sfxNote(48),1.60,0.040);
+    MUSIC.duck(0.65,1.80);
+  },
+  coin(){ const t=AUDIO.now()+0.001;
+    AUDIO.bell(t,sfxNote(31),0.35,0.045);
+    AUDIO.bell(t+0.055,sfxNote(38),0.50,0.036);
+  },
+  pager(){ const t=AUDIO.now()+0.001;
+    for(let i=0;i<3;i++) AUDIO.pluck(t+i*0.115,sfxNote(36),0.060,0.055,"square",null,3);
+    AUDIO.noise(t,0.020,0.020,"highpass",4000,1);
+  },
+  police(){ const t=AUDIO.now()+0.001;
+    for(let i=0;i<3;i++){ const a0=t+i*0.52;
+      AUDIO.osc("sawtooth",740,a0,0.26,0.050,null,0,660);
+      AUDIO.osc("sawtooth",988,a0+0.26,0.26,0.050,null,0,880);
+      AUDIO.osc("sine",55,a0,0.50,0.050);
+    }
+    AUDIO.noise(t,1.50,0.035,"bandpass",300,1.4,null,1800);
+    AUDIO.DRUM.kick(t,0.50);
+    MUSIC.duck(0.70,1.80);
+  },
+  travel(){ const t=AUDIO.now()+0.001;
+    AUDIO.noise(t,0.50,0.070,"bandpass",400,1.0,null,1800);
+    AUDIO.osc("sine",110,t,0.45,0.045,null,0,190);
+  },
+  // richer version used by the travel overlay (car / boat variants)
+  travelMove(car,boat){ const t=AUDIO.now()+0.001;
+    AUDIO.noise(t,0.85,0.130,"bandpass",boat?200:300,1.1,null,boat?1400:3000);
+    AUDIO.noise(t+0.30,0.60,0.055,"lowpass",boat?600:1600,0.8,null,300);
+    AUDIO.osc("sine",boat?70:120,t,0.70,0.060,null,0,car?300:180);
+    AUDIO.osc("triangle",boat?105:180,t+0.05,0.50,0.030,null,7,car?420:250);
+    if(car) AUDIO.DRUM.hat(t+0.42,0.050,true);
+    MUSIC.duck(0.30,0.90);
+  },
+  // a pager-lit dialogue sting: mallet chime over a low swell
+  storylet(){ const t=AUDIO.now()+0.001, c=MUSIC.chord();
+    AUDIO.bell(t,sfxNote(24),0.90,0.040);
+    AUDIO.bell(t+0.13,sfxNote(24+c[2]),1.30,0.032);
+    AUDIO.osc("sine",sfxNote(-12),t,1.60,0.045);
+    AUDIO.noise(t,0.50,0.018,"lowpass",700,0.7,null,240);
+    MUSIC.duck(0.45,1.60);
+  },
+  achievement(i){ const t=AUDIO.now()+0.001, up=((i||0)%3)*2;
+    [0,4,7,12,16].forEach((s,k)=>AUDIO.bell(t+k*0.085,sfxNote(24+up+s),0.90,0.042-k*0.004));
+    AUDIO.DRUM.kick(t,0.34); AUDIO.DRUM.crash(t,0.070);
+    AUDIO.noise(t+0.40,1.10,0.028,"highpass",6000,0.5);
+    MUSIC.duck(0.35,1.40);
+  },
+  // era takeover: 1.15s riser, then the impact
+  era(){ const t=AUDIO.now()+0.001, h=t+1.15;
+    AUDIO.noise(t,1.15,0.100,"bandpass",300,1.6,null,6500);
+    AUDIO.osc("sawtooth",sfxNote(-12),t,1.15,0.050,null,0,sfxNote(12));
+    AUDIO.osc("sawtooth",sfxNote(-12),t,1.15,0.040,null,9,sfxNote(11));
+    AUDIO.DRUM.kick(h,0.72); AUDIO.DRUM.crash(h,0.120);
+    AUDIO.DRUM.tom(h+0.12,sfxNote(-5),0.28); AUDIO.DRUM.tom(h+0.24,sfxNote(-12),0.28);
+    AUDIO.osc("sawtooth",sfxNote(0),h,2.00,0.048,null,-7);
+    AUDIO.osc("sawtooth",sfxNote(7),h,2.00,0.044,null,7);
+    MUSIC.duck(0.75,2.60);
+  },
+  // ~0.9s tension pulse; the police screen retriggers it on an interval
+  chaseBed(){ const t=AUDIO.now()+0.001;
+    AUDIO.osc("sine",55,t,0.85,0.055);
+    AUDIO.osc("sine",58.2,t,0.85,0.035);
+    AUDIO.DRUM.kick(t,0.34); AUDIO.DRUM.kick(t+0.42,0.22);
+    AUDIO.noise(t+0.10,0.45,0.022,"bandpass",900,2.4,null,2400);
+    AUDIO.osc("sawtooth",311,t+0.02,0.30,0.020,null,0,440);
+    AUDIO.osc("sawtooth",440,t+0.34,0.30,0.018,null,0,311);
+  },
+  endingWin(){ const t=AUDIO.now()+0.001;
+    [0,7,12,16,19,24].forEach((s,i)=>AUDIO.pluck(t+i*0.12,sfxNote(12+s),0.70,0.075,"sawtooth",null,9));
+    AUDIO.DRUM.kick(t,0.60); AUDIO.DRUM.crash(t+0.70,0.120);
+    [0,4,7,12].forEach(s=>AUDIO.osc("sawtooth",sfxNote(s),t+0.72,2.60,0.048,null,Math.random()*8-4));
+    AUDIO.bell(t+0.75,sfxNote(36),2.20,0.045);
+  },
+  endingLose(){ const t=AUDIO.now()+0.001;
+    AUDIO.DRUM.kick(t,0.70); AUDIO.DRUM.crash(t,0.100);
+    [0,3,6,11].forEach((s,i)=>AUDIO.osc("sawtooth",sfxNote(s-12),t+i*0.02,3.00,0.046,null,(i-1.5)*9));
+    AUDIO.noise(t,2.40,0.040,"lowpass",1400,0.8,null,180);
+    AUDIO.osc("sine",41,t,3.20,0.060);
+  },
+});
+
+// The existing React effect keeps calling new SynthLoop().start()/.stop().
+// Point that API at the new transport; `this` is the owner token so React's
+// cleanup/setup ordering can never leave two transports running.
+SynthLoop.prototype.start=function(getMood){ MUSIC.start(getMood,this); };
+SynthLoop.prototype.stop=function(){ MUSIC.stop(this); };
 const ft="'Courier New',monospace", fb="Georgia,'Times New Roman',serif";
 
 const KEYFRAMES=`
@@ -1577,6 +2196,28 @@ const KEYFRAMES=`
 @keyframes streakBorder{0%,100%{box-shadow:inset 0 0 26px #FF6B3550}50%{box-shadow:inset 0 0 64px #FF6B35a0}}
 @keyframes rainbowB{from{filter:hue-rotate(0deg)}to{filter:hue-rotate(360deg)}}
 @keyframes hudPulse{0%,100%{box-shadow:0 0 4px #FF173355}50%{box-shadow:0 0 18px #FF1733}}
+@keyframes skyDriftA{0%{transform:translateX(-16px)}100%{transform:translateX(16px)}}
+@keyframes skyDriftB{0%{transform:translateX(9px)}100%{transform:translateX(-9px)}}
+@keyframes fogRoll{0%{transform:translateX(-70px);opacity:.14}50%{opacity:.30}100%{transform:translateX(70px);opacity:.14}}
+@keyframes neonBuzz{0%,100%{opacity:1}40%{opacity:1}41%{opacity:.22}42%{opacity:.9}43%{opacity:.35}44%{opacity:1}76%{opacity:1}77%{opacity:.45}78%{opacity:1}}
+@keyframes neonBuzz2{0%,100%{opacity:.96}16%{opacity:.96}17%{opacity:.28}18%{opacity:.96}62%{opacity:.96}63%{opacity:.42}64%{opacity:.96}65%{opacity:.18}66%{opacity:.96}}
+@keyframes tubeGlow{0%,100%{opacity:.45}50%{opacity:1}}
+@keyframes beaconBlink{0%,100%{opacity:.12}7%{opacity:1}15%{opacity:.12}}
+@keyframes reflShimmer{0%{transform:translateX(-6px)}50%{transform:translateX(6px)}100%{transform:translateX(-6px)}}
+@keyframes reflBand{0%{transform:translateY(0)}100%{transform:translateY(7px)}}
+@keyframes crtRoll{0%{transform:translate3d(0,0,0)}100%{transform:translate3d(0,-33.3333%,0)}}
+@keyframes trackGlitch{0%{transform:translateY(-14vh);opacity:0}1%{opacity:.5}4%{opacity:.45}9%{transform:translateY(114vh);opacity:0}100%{transform:translateY(114vh);opacity:0}}
+@keyframes hazeWave{0%,100%{transform:translateY(0) scaleY(1);opacity:.45}50%{transform:translateY(-5px) scaleY(1.07);opacity:.9}}
+@keyframes strobeL{0%,100%{opacity:0}5%{opacity:.6}11%{opacity:0}19%{opacity:.4}25%{opacity:0}}
+@keyframes strobeR{0%,100%{opacity:0}55%{opacity:.6}61%{opacity:0}69%{opacity:.4}75%{opacity:0}}
+@keyframes aberrJit{0%,100%{transform:translateX(0)}50%{transform:translateX(1.3px)}}
+@keyframes bloomBreath{0%,100%{opacity:.45}50%{opacity:.85}}
+@keyframes logoBuzz{0%,100%{opacity:1}51%{opacity:1}52%{opacity:.22}53%{opacity:1}54%{opacity:.5}55%{opacity:1}87%{opacity:1}88%{opacity:.35}89%{opacity:1}}
+@keyframes logoHum{0%,100%{opacity:.55}50%{opacity:1}}
+@keyframes palmSway{0%,100%{transform:rotate(-1.8deg)}50%{transform:rotate(1.8deg)}}
+@keyframes washSweep{0%{transform:translateX(-130%) skewX(-14deg);opacity:0}12%{opacity:.9}60%{opacity:.5}100%{transform:translateX(250%) skewX(-14deg);opacity:0}}
+@keyframes washTint{0%{opacity:.55}100%{opacity:0}}
+@keyframes dotPulse{0%,100%{transform:scale(1);opacity:.85}50%{transform:scale(1.9);opacity:.18}}
 button:active{transform:scale(.95)}
 button{transition:transform .16s cubic-bezier(.34,1.56,.64,1), box-shadow .15s ease, filter .15s ease}
 *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
@@ -1636,6 +2277,64 @@ const Bar=({v,max=100,color,h=5})=>(
     <div style={{height:"100%",width:`${CL(v/max*100,0,100)}%`,background:color,borderRadius:h,transition:"width .4s ease",boxShadow:`0 0 6px ${color}`}}/>
   </div>
 );
+
+// ── Tier-coded drug glyph: hex plate, tier color, break-even halo ──
+const TIER_C=[C.green,C.orange,C.pink];
+const TIER_TAG=["ST","MID","WT"];
+const DrugGlyph=({d,owned=0,sel=false})=>{
+  const c=TIER_C[d.tier]||C.dim;
+  return(
+    <div style={{position:"relative",width:30,height:34,flexShrink:0}}>
+      <svg viewBox="0 0 30 34" style={{position:"absolute",inset:0,width:"100%",height:"100%",display:"block"}}>
+        <polygon points="15,1.4 28.7,9.2 28.7,24.8 15,32.6 1.3,24.8 1.3,9.2"
+          fill={`${c}16`} stroke={`${c}${sel?"ee":owned>0?"aa":"55"}`} strokeWidth={sel?1.6:1.1}/>
+        {owned>0&&<polygon points="15,3.8 26.3,10.3 26.3,23.7 15,30.2 3.7,23.7 3.7,10.3"
+          fill="none" stroke={C.gold} strokeWidth=".8"
+          style={{animation:"tubeGlow 2.6s ease-in-out infinite"}}/>}
+        <polygon points="15,1.4 28.7,9.2 15,17 1.3,9.2" fill="#FFFFFF" opacity=".05"/>
+      </svg>
+      <div style={{position:"absolute",left:0,right:0,top:4,textAlign:"center",fontSize:14,
+        lineHeight:1.15,filter:`drop-shadow(0 0 5px ${c}bb)`}}>{d.emoji}</div>
+      <div style={{position:"absolute",left:0,right:0,bottom:1.5,textAlign:"center",fontFamily:ft,
+        fontSize:6,letterSpacing:.5,fontWeight:"bold",color:c,opacity:.9}}>{TIER_TAG[d.tier]}</div>
+    </div>
+  );
+};
+
+// ── Price history sparkline: gradient area, trend color, break-even line ──
+let SPARK_UID=0;
+const SparkPro=({data,color=C.blue,avg=0,w=52,h=24})=>{
+  const uid=useRef(0);
+  if(!uid.current) uid.current=++SPARK_UID;
+  if(!data||data.length<2) return <div style={{width:w,height:h,flexShrink:0}}/>;
+  const mn=Math.min(...data), mx=Math.max(...data), rng=(mx-mn)||1;
+  const yOf=v=>h-3-(CL((v-mn)/rng,0,1))*(h-8);
+  const pts=data.map((v,i)=>[(i/(data.length-1))*w, yOf(v)]);
+  const line=pts.map(p=>`${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  const area=`0,${h} ${line} ${w},${h}`;
+  const up=data[data.length-1]>=data[0];
+  const sc=up?C.green:C.pink;
+  const last=pts[pts.length-1];
+  const gid="spk"+uid.current;
+  const showAvg=avg>0&&avg>mn&&avg<mx;
+  return(
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} style={{display:"block",flexShrink:0}}>
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={sc} stopOpacity=".45"/>
+          <stop offset="100%" stopColor={sc} stopOpacity="0"/>
+        </linearGradient>
+      </defs>
+      <polygon points={area} fill={`url(#${gid})`}/>
+      <polyline points={line} fill="none" stroke={color} strokeWidth="3.2" opacity=".14" strokeLinejoin="round"/>
+      {showAvg&&<line x1="0" y1={yOf(avg)} x2={w} y2={yOf(avg)} stroke={C.gold} strokeWidth=".7" strokeDasharray="2 2" opacity=".75"/>}
+      <polyline points={line} fill="none" stroke={sc} strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round"/>
+      <circle cx={last[0]} cy={last[1]} r="2.6" fill={sc} opacity=".3"
+        style={{transformBox:"fill-box",transformOrigin:"center",animation:"dotPulse 2s ease-in-out infinite"}}/>
+      <circle cx={last[0]} cy={last[1]} r="1.7" fill={sc}/>
+    </svg>
+  );
+};
 
 // ── FLIP-style price tick: animate the diff with native WAAPI before paint ──
 const PriceCell=({value})=>{
@@ -2036,6 +2735,312 @@ const MiamiSky=memo(({move,heat,locColor,locIdx=0})=>{
 });
 
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// PARALLAX MIAMI — layered neon-noir skyline (drop-in for MiamiSky)
+//   layer 0 haze towers · 1 far block · 2 near block + windows
+//   3 rooftop neon + beacons · 4 district scenery · 5 wet-asphalt
+//   reflection · 6 headlights · 7 siren wash · 8 CRT glass
+// ═══════════════════════════════════════════════════════════════
+const HX2=h=>[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];
+const MIX=(a,b,t)=>{const A=HX2(a),B=HX2(b),k=CL(t,0,1);
+  return "#"+[0,1,2].map(i=>Math.round(A[i]+(B[i]-A[i])*k).toString(16).padStart(2,"0")).join("");};
+
+// four-stop skies: 0 = high day, 1 = dusk, 2 = golden hour, 3 = deep night
+const SKY_RAMPS=[
+  ["#0A3C74","#2C74AE","#84BCD8","#F2B168"],
+  ["#170A3A","#4A1858","#A62C58","#F2653A"],
+  ["#2A1052","#7C2A64","#D6563C","#FFB53F"],
+  ["#03060E","#080E2C","#121844","#241C56"],
+];
+const skyRamp=(move,heat)=>{
+  const ph=((move%4)+4)%4, k=CL(heat/100,0,1), t=k*.66;
+  return { ph, night:ph===1||ph===3,
+    stops:SKY_RAMPS[ph].map((c,i)=>MIX(c, i<2?"#2C0509":"#C4181C", t*(i<2?.85:1))) };
+};
+
+// slowest parallax layer — hazy distance towers
+const BUILD0=[[4,22,26],[42,30,18],[74,18,30],[118,26,22],[156,34,17],[186,20,28],[228,28,20],[266,17,32],[314,26,19],[352,21,26],[388,30,22]];
+// rooftop signage, tuned to sit on BUILD1 roofs (base y = 124)
+const SKY_SIGNS=[
+  {x:70, y:56, w:22, h:8, c:C.pink,  d:5.5, dl:0},
+  {x:213,y:54, w:21, h:8, c:C.blue,  d:7.2, dl:1.1, alt:true},
+  {x:364,y:60, w:23, h:8, c:C.gold,  d:6.3, dl:2.4},
+  {x:142,y:63, w:26, h:7, c:C.green, d:8.1, dl:.6, alt:true},
+];
+
+const SkySign=({x,y,w,h,c,d,dl,alt})=>(
+  <g style={{animation:`${alt?"neonBuzz2":"neonBuzz"} ${d}s linear ${dl}s infinite`}}>
+    <rect x={x-4} y={y-4} width={w+8} height={h+8} rx="4" fill={c} opacity=".07"/>
+    <rect x={x-2} y={y-2} width={w+4} height={h+4} rx="3" fill={c} opacity=".14"/>
+    <rect x={x} y={y} width={w} height={h} rx="2" fill="#04080F" stroke={c} strokeWidth="1"/>
+    <rect x={x+2.4} y={y+h/2-.9} width={w*.26} height="1.8" rx=".9" fill={c}/>
+    <rect x={x+w*.38} y={y+h/2-.9} width={w*.22} height="1.8" rx=".9" fill="#FFFFFF" opacity=".85"/>
+    <rect x={x+w*.68} y={y+h/2-.9} width={w*.24} height="1.8" rx=".9" fill={c}/>
+    <rect x={x+w/2-.6} y={y+h} width="1.2" height="5" fill="#050B16"/>
+  </g>
+);
+
+const MiamiSkyDeluxe=memo(({move=0,heat=0,locColor=C.pink,locIdx=0,ht=146,plain=false})=>{
+  const S=skyRamp(move,heat);
+  const night=S.night, hot=CL(heat/100,0,1);
+  const siren=heat>60&&!plain;
+  const HZ=122;                                  // horizon / waterline
+  const orb = S.ph===0 ? {x:336,y:32,r:16,day:true}
+            : S.ph===2 ? {x:252,y:58,r:27,day:true}   // big retro sun sinking onto the roofline
+            : S.ph===1 ? {x:350,y:42,r:12,day:false}
+            :            {x:318,y:26,r:11,day:false};
+  const winWarm = night?"#FFD27A":"#FFC98A";
+  const winCool = night?"#8FE9FF":"#CFE6FF";
+  const nearFill = night?"#050A16":MIX("#1A0A24",S.stops[1],.28);
+  const midFill  = night?"#080F22":MIX("#22102E",S.stops[1],.42);
+  const farFill  = MIX(S.stops[1],S.stops[2],.45);
+  return(
+    <div style={{position:"relative",height:ht,overflow:"hidden",background:S.stops[0]}}>
+      <svg viewBox="0 0 420 146" preserveAspectRatio="xMidYMax slice"
+        style={{position:"absolute",inset:0,width:"100%",height:"100%",display:"block"}}>
+        <defs>
+          <linearGradient id="dxSky" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor={S.stops[0]}/>
+            <stop offset="38%"  stopColor={S.stops[1]}/>
+            <stop offset="72%"  stopColor={S.stops[2]}/>
+            <stop offset="100%" stopColor={S.stops[3]}/>
+          </linearGradient>
+          <radialGradient id="dxOrbG" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"   stopColor={orb.day?"#FFE9A8":"#EAF1FF"} stopOpacity=".55"/>
+            <stop offset="55%"  stopColor={orb.day?"#FF8A46":"#9EC8FF"} stopOpacity=".22"/>
+            <stop offset="100%" stopColor={orb.day?"#FF2D7B":"#5A7CC0"} stopOpacity="0"/>
+          </radialGradient>
+          <linearGradient id="dxSunF" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor="#FFE27A"/>
+            <stop offset="48%"  stopColor="#FF8A3C"/>
+            <stop offset="100%" stopColor="#FF2D7B"/>
+          </linearGradient>
+          <clipPath id="dxSlat">
+            <rect x="-40" y="-40" width="80" height="46"/>
+            <rect x="-40" y="9"   width="80" height="7"/>
+            <rect x="-40" y="19"  width="80" height="5"/>
+            <rect x="-40" y="27"  width="80" height="3.4"/>
+            <rect x="-40" y="33"  width="80" height="2.2"/>
+          </clipPath>
+          <linearGradient id="dxWaterF" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"   stopColor={night?"#0A1C34":"#123255"} stopOpacity=".95"/>
+            <stop offset="100%" stopColor={night?"#01060E":"#050D1A"} stopOpacity="1"/>
+          </linearGradient>
+          <radialGradient id="dxOrbRef" cx="50%" cy="0%" r="88%">
+            <stop offset="0%"   stopColor={orb.day?"#FFC069":"#DCEAFF"} stopOpacity=".62"/>
+            <stop offset="52%"  stopColor={orb.day?"#FF7A46":"#8FB4F0"} stopOpacity=".24"/>
+            <stop offset="100%" stopColor={orb.day?"#FF2D7B":"#4C6EB0"} stopOpacity="0"/>
+          </radialGradient>
+        </defs>
+
+        {/* ── sky ── */}
+        <rect x="0" y="0" width="420" height="146" fill="url(#dxSky)"/>
+
+        {/* ── stars (night) ── */}
+        {night&&<g style={{animation:"skyDriftB 46s ease-in-out infinite alternate"}}>
+          {[24,58,96,132,168,204,240,272,308,344,380,404,44,148,286].map((x,i)=>(
+            <circle key={i} cx={x} cy={8+((i*29)%52)} r={i%4===0?1.3:.75} fill="#FFFFFF"
+              style={{animation:`twinkle ${2+(i%5)*.6}s ease-in-out ${i*.31}s infinite`}}/>))}
+        </g>}
+
+        {/* ── sun / moon + halo ── */}
+        <g transform={`translate(${orb.x},${orb.y})`}>
+          <circle r={orb.r*3.6} fill="url(#dxOrbG)"/>
+          {orb.day?(
+            <g style={{animation:"sunPulse 5s ease-in-out infinite"}}>
+              <circle r={orb.r} fill="url(#dxSunF)" clipPath="url(#dxSlat)"/>
+            </g>
+          ):(<>
+            <circle r={orb.r} fill="#EDF1F8" opacity=".93"/>
+            <circle cx={-orb.r*.36} cy={-orb.r*.3} r={orb.r*.86} fill={S.stops[0]} opacity=".84"/>
+          </>)}
+        </g>
+
+        {/* ── drifting cloud / fog bands ── */}
+        <g style={{animation:"skyDriftA 54s ease-in-out infinite alternate"}} opacity={night?".26":".5"}>
+          <ellipse cx="84"  cy="30" rx="34" ry="6"   fill={MIX(S.stops[2],"#FFFFFF",.35)} opacity=".4"/>
+          <ellipse cx="118" cy="25" rx="20" ry="4.2" fill={MIX(S.stops[2],"#FFFFFF",.5)}  opacity=".33"/>
+          <ellipse cx="248" cy="42" rx="40" ry="6.5" fill={MIX(S.stops[2],"#FFFFFF",.28)} opacity=".3"/>
+          <ellipse cx="196" cy="18" rx="26" ry="4"   fill={MIX(S.stops[1],"#FFFFFF",.42)} opacity=".22"/>
+        </g>
+
+        {/* ── layer 0: haze towers ── */}
+        <g fill={farFill} opacity=".55" style={{animation:"skyDriftB 70s ease-in-out infinite alternate"}}>
+          {BUILD0.map(([x,bh,bw],i)=><rect key={i} x={x} y={118-bh} width={bw} height={bh}/>)}
+        </g>
+
+        {/* ── ground haze between layers ── */}
+        <rect x="0" y="88" width="420" height="34" fill={MIX(S.stops[2],S.stops[3],.4)} opacity={night?".22":".38"}/>
+
+        {/* ── layer 1: mid block ── */}
+        <g fill={midFill} style={{animation:"skyDriftB 38s ease-in-out infinite alternate"}}>
+          {BUILD2.map(([x,bh,bw],i)=><rect key={i} x={x} y={120-bh} width={bw} height={bh}/>)}
+          {BUILD2.map(([x,bh,bw],i)=><rect key={"t"+i} x={x} y={120-bh} width={bw} height="1.2" fill={locColor} opacity=".22"/>)}
+        </g>
+
+        {/* ── layer 2: near block + lit windows ── */}
+        <g>
+          {BUILD1.map(([x,bh,bw],i)=>(<g key={i}>
+            <rect x={x} y={124-bh} width={bw} height={bh} fill={nearFill}/>
+            <rect x={x} y={124-bh} width={bw} height="1.4" fill={locColor} opacity=".55"/>
+            <rect x={x} y={124-bh} width="1" height={bh} fill={locColor} opacity=".16"/>
+            {Array.from({length:Math.floor(bh/9)}).map((_,r)=>
+              Array.from({length:Math.floor(bw/9)}).map((_,c)=>{
+                const seed=(i*7+r*3+c*5+move);
+                const lit=(seed%(night?3:6))===0;
+                if(!lit) return null;
+                const cool=(seed%7)===0;
+                return <rect key={r+"-"+c} x={x+3+c*9} y={128-bh+r*9} width="3.4" height="4"
+                  fill={cool?winCool:winWarm} opacity={night?.95:.45}/>;
+              }))}
+          </g>))}
+        </g>
+
+        {/* ── layer 3: rooftop neon, antenna, beacon ── */}
+        {SKY_SIGNS.map((s,i)=><SkySign key={i} {...s}/>)}
+        <line x1="223" y1="64" x2="223" y2="46" stroke="#0A1424" strokeWidth="1.3"/>
+        <circle cx="223" cy="45" r="1.9" fill="#FF3B4E" style={{animation:"beaconBlink 2.3s linear infinite"}}/>
+        <line x1="16" y1="78" x2="16" y2="62" stroke="#0A1424" strokeWidth="1"/>
+        <circle cx="16" cy="61" r="1.4" fill={C.blue} style={{animation:"beaconBlink 3.1s linear .8s infinite"}}/>
+
+        {/* ── palms (foreground silhouettes) ── */}
+        <g fill="#02090F">
+          <animateTransform attributeName="transform" type="rotate" values="-1.4 44 124;1.4 44 124;-1.4 44 124" dur="6s" repeatCount="indefinite"/>
+          <path d="M44 124 q2 -18 0 -29 q11 4 15 -2 q-9 0 -13 -4 q11 -2 13 -9 q-11 2 -15 0 q2 -9 9 -11 q-10 0 -13 7 q-3 -7 -11 -8 q6 4 7 11 q-7 -2 -13 1 q8 2 13 7 q-8 3 -12 1 q6 7 14 5 q-2 13 0 31 Z"/>
+        </g>
+        <g fill="#02090F">
+          <animateTransform attributeName="transform" type="rotate" values="1.2 390 124;-1.2 390 124;1.2 390 124" dur="7.4s" repeatCount="indefinite"/>
+          <path d="M390 124 q2 -16 0 -25 q10 3 13 -2 q-8 0 -11 -3 q10 -2 11 -8 q-9 2 -13 0 q2 -8 8 -9 q-9 0 -11 6 q-3 -6 -10 -7 q5 3 6 9 q-6 -2 -11 1 q7 2 11 6 q-7 3 -10 1 q5 6 12 4 q-2 11 0 27 Z"/>
+        </g>
+
+        {/* ── layer 4: district scenery ── */}
+        {!plain&&locIdx===0&&<g>
+          <rect x="300" y="92" width="26" height="32" rx="3" fill={night?"#0A1226":"#1B0E2A"}/>
+          <rect x="306" y="88" width="14" height="6" rx="3" fill={C.flamingo} opacity=".85" style={{animation:"neonBuzz 4.4s linear infinite"}}/>
+          <rect x="304" y="98" width="18" height="2" fill={C.blue} opacity=".8"/>
+          <rect x="304" y="106" width="18" height="2" fill={C.blue} opacity=".6"/>
+          <g><circle cx="262" cy="120" r="6" fill={C.flamingo} opacity=".8"/><rect x="261" y="120" width="2" height="6" fill="#03101C"/></g>
+          <g><circle cx="278" cy="121" r="5" fill={C.gold} opacity=".8"/><rect x="277" y="121" width="2" height="5" fill="#03101C"/></g>
+        </g>}
+        {!plain&&locIdx===1&&<g>
+          <path d="M210 102 Q240 112 270 102" stroke={C.gold} strokeWidth="1" fill="none" opacity=".6"/>
+          {[216,228,240,252,264].map((x,i)=><circle key={i} cx={x} cy={104+Math.sin(i)*3} r="1.6" fill={[C.flamingo,C.gold,C.blue,C.orange,C.green][i]} style={{animation:`twinkle ${1.8+i*.3}s infinite`}}/>)}
+          <rect x="286" y="108" width="22" height="16" fill="#2A1430"/>
+          <rect x="288" y="110" width="8" height="12" fill={C.orange} opacity=".7"/>
+          <rect x="297" y="110" width="9" height="12" fill={C.blue} opacity=".6"/>
+        </g>}
+        {!plain&&locIdx===2&&<g>
+          <rect x="268" y="116" width="9" height="8" fill="#1A1208"/>
+          <path d="M270 116 q1 -5 2.5 -2 q1 -4 2.5 0 q1.5 -3 2 2 Z" fill={C.orange} opacity={night?".95":".5"} style={{animation:"twinkle 1.1s infinite"}}/>
+          <rect x="294" y="98" width="14" height="12" fill="#0A0A12"/>
+          <path d="M294 98 L308 110 M308 98 L294 110" stroke="#3A2E1A" strokeWidth="2"/>
+        </g>}
+        {!plain&&locIdx===3&&<g>
+          <path d="M252 124 L252 108 L266 100 L280 108 L280 124 Z" fill={night?"#0D1430":"#241032"}/>
+          <path d="M250 109 L266 99 L282 109" stroke={C.orange} strokeWidth="3" fill="none" opacity=".8"/>
+          <circle cx="294" cy="116" r="7" fill="#0A2418"/><rect x="293" y="120" width="2" height="5" fill="#03101C"/>
+          <circle cx="310" cy="117" r="5.5" fill="#0A2418"/><rect x="309" y="120" width="2" height="5" fill="#03101C"/>
+        </g>}
+        {!plain&&locIdx===4&&<g>
+          <path d="M250 128 L296 128 L290 134 L256 134 Z" fill="#0A0F1E"/>
+          <rect x="262" y="121" width="22" height="7" rx="2" fill="#101A30"/>
+          {[266,272,278].map((x,i)=><circle key={i} cx={x} cy="124" r="1.4" fill={[C.flamingo,C.blue,C.gold][i]} style={{animation:`twinkle ${.9+i*.25}s infinite`}}/>)}
+          <path d="M252 126 L296 126" stroke={C.blue} strokeWidth=".8" opacity=".7"/>
+        </g>}
+        {!plain&&locIdx===5&&<g>
+          <path d="M306 124 L309 94 L315 94 L318 124 Z" fill={night?"#0B1226":"#1C0E28"}/>
+          <rect x="307" y="88" width="10" height="7" rx="2" fill="#0A0F1E"/>
+          <circle cx="312" cy="91" r="2.2" fill={C.gold} style={{animation:"twinkle 2.4s infinite"}}/>
+          <path d="M312 91 L292 82 L292 100 Z" fill={C.gold} opacity=".12" style={{animation:"twinkle 2.4s infinite"}}/>
+          <path d="M256 131 L276 131 L272 135 L260 135 Z" fill="#0A0F1E"/>
+        </g>}
+
+        {/* ── neon horizon ── */}
+        <rect x="0" y={HZ-5} width="420" height="5" fill={locColor} opacity=".16"/>
+        <rect x="0" y={HZ} width="420" height="2.4" fill={locColor} opacity=".95"/>
+        <rect x="0" y={HZ} width="420" height="8" fill={locColor} opacity=".2"/>
+
+        {/* ── layer 5: wet asphalt / bay — smeared neon, not a mirror ── */}
+        <rect x="0" y={HZ+2} width="420" height={146-HZ-2} fill="url(#dxWaterF)"/>
+        {/* the horizon tube bleeding down into the wet */}
+        <rect x="0" y={HZ+2} width="420" height="6"  fill={locColor} opacity=".24"/>
+        <rect x="0" y={HZ+2} width="420" height="12" fill={locColor} opacity=".12"/>
+        <rect x="0" y={HZ+2} width="420" height="20" fill={locColor} opacity=".06"/>
+        {/* sun / moon light path */}
+        <rect x={orb.x-36} y={HZ+2} width="72" height={146-HZ-2} fill="url(#dxOrbRef)"/>
+        {/* vertical smears — signage first, then a few window columns */}
+        <g style={{animation:"reflShimmer 5.6s ease-in-out infinite"}}>
+          {SKY_SIGNS.map((s,i)=>(<g key={"s"+i}>
+            <rect x={s.x+s.w*.06} y={HZ+2} width={s.w*.88} height="22" fill={s.c} opacity=".13"/>
+            <rect x={s.x+s.w*.22} y={HZ+2} width={s.w*.56} height="15" fill={s.c} opacity=".2"/>
+            <rect x={s.x+s.w*.4}  y={HZ+2} width={s.w*.2}  height="9"  fill={s.c} opacity=".34"/>
+          </g>))}
+          {BUILD1.map(([x,bh,bw],i)=>i%2===0?(
+            <rect key={"w"+i} x={x+bw*.34} y={HZ+2} width="2.6" height={7+((i*5)%11)} fill={winWarm} opacity=".22"/>
+          ):null)}
+        </g>
+        {/* ripple bands break the smears up */}
+        <g style={{animation:"reflBand 3.4s ease-in-out infinite alternate"}}>
+          {[126,129.5,133,136.5,140,143.5].map((y,i)=><rect key={i} x="0" y={y} width="420" height="1.5"
+            fill={night?"#02070E":"#04101C"} opacity={.4+i*.08}/>)}
+        </g>
+        <g stroke={locColor} strokeWidth="1" opacity=".38" style={{animation:"waterSh 5s ease-in-out infinite"}}>
+          <line x1="40" y1="131" x2="112" y2="131"/><line x1="192" y1="137" x2="262" y2="137"/><line x1="312" y1="133" x2="382" y2="133"/>
+        </g>
+
+        {/* ── layer 6: headlights on the causeway ── */}
+        <g>
+          <rect x="-14" y="120.4" width="7" height="1.5" rx=".75" fill="#FFE9A0" opacity=".9">
+            <animateTransform attributeName="transform" type="translate" values="0 0;450 0" dur="7.5s" repeatCount="indefinite"/>
+          </rect>
+          <rect x="430" y="118.6" width="7" height="1.5" rx=".75" fill="#FF7B7B" opacity=".85">
+            <animateTransform attributeName="transform" type="translate" values="0 0;-450 0" dur="10s" repeatCount="indefinite" begin="2s"/>
+          </rect>
+          <rect x="-14" y="119" width="5" height="1.2" rx=".6" fill="#FFF3C0" opacity=".7">
+            <animateTransform attributeName="transform" type="translate" values="0 0;450 0" dur="12s" repeatCount="indefinite" begin="4.4s"/>
+          </rect>
+        </g>
+
+        {/* ── layer 7: chopper + searchlight when the feds are close ── */}
+        {siren&&<g>
+          <rect x="150" y="13" width="15" height="5" rx="2.5" fill="#0A0F1C"/>
+          <rect x="142" y="11.4" width="30" height="1.6" rx=".8" fill="#0A0F1C">
+            <animateTransform attributeName="transform" type="rotate" values="0 157 12.2;180 157 12.2" dur=".22s" repeatCount="indefinite"/>
+          </rect>
+          <circle cx="151" cy="15.5" r="1.2" fill="#FF1733">
+            <animate attributeName="opacity" values="1;.2;1" dur=".8s" repeatCount="indefinite"/>
+          </circle>
+          <g transform="translate(157,18)">
+            <polygon points="0,0 -16,104 16,104" fill="#FFF7C8" opacity=".13">
+              <animateTransform attributeName="transform" type="rotate" values="-17;17;-17" dur="5.2s" repeatCount="indefinite"/>
+            </polygon>
+          </g>
+        </g>}
+      </svg>
+
+      {/* ── heat bleed ── */}
+      {hot>.35&&<div style={{position:"absolute",inset:0,pointerEvents:"none",
+        background:"radial-gradient(120% 80% at 50% 100%, rgba(196,24,28,.42), transparent 62%)",
+        opacity:(hot-.35)*1.5}}/>}
+      {hot>.45&&<div style={{position:"absolute",left:0,right:0,bottom:0,height:"66%",pointerEvents:"none",
+        background:"repeating-linear-gradient(0deg, rgba(255,120,60,.09) 0 2px, rgba(0,0,0,0) 2px 6px)",
+        animation:"hazeWave 2.8s ease-in-out infinite",willChange:"transform"}}/>}
+
+      {/* ── siren wash ── */}
+      {siren&&<>
+        <div style={{position:"absolute",inset:0,pointerEvents:"none",background:"linear-gradient(90deg, #FF173355, transparent 58%)",animation:"strobeL 1.5s linear infinite"}}/>
+        <div style={{position:"absolute",inset:0,pointerEvents:"none",background:`linear-gradient(270deg, ${C.blue}55, transparent 58%)`,animation:"strobeR 1.5s linear infinite"}}/>
+      </>}
+
+      {/* ── layer 8: CRT glass ── */}
+      <div style={{position:"absolute",inset:0,pointerEvents:"none",
+        background:"repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0 1px, rgba(0,0,0,0) 1px 3px)"}}/>
+      <div style={{position:"absolute",inset:0,pointerEvents:"none",
+        background:`radial-gradient(120% 100% at 50% 40%, transparent 46%, rgba(0,0,0,.5) 100%), linear-gradient(180deg, transparent 76%, ${C.dark} 100%)`}}/>
+    </div>
+  );
+});
+
 // TYPEWRITER + STORY SCENE (cinematic dialogue overlay)
 // ═══════════════════════════════════════════════════════════════
 const TypeText=({text,sound,onDone,instant})=>{
@@ -2268,6 +3273,65 @@ const CarRear=({sport})=>sport?(
     <rect x="8" y="38" width="92" height="8" rx="3" fill="#05060A"/>
   </svg>
 );
+
+// ═══════════════════════════════════════════════════════════════
+// SCREEN-SPACE CRT / VHS GRADE — one fixed layer over everything
+//   NOTE: a fixed + z-indexed element is its own stacking context,
+//   so mix-blend-mode cannot reach the page. Everything here is
+//   plain low-alpha compositing on purpose.
+// ═══════════════════════════════════════════════════════════════
+const CRTOverlay=memo(({heat=0,color=C.pink,night=false})=>{
+  const k=CL(heat/100,0,1);
+  return(
+  <div style={{position:"fixed",inset:0,zIndex:2,pointerEvents:"none",overflow:"hidden"}}>
+    {/* rolling scanlines — transform-animated so it composites, never repaints */}
+    <div style={{position:"absolute",left:0,right:0,top:"-100%",height:"300%",opacity:.44,
+      background:"repeating-linear-gradient(0deg, rgba(0,0,0,.34) 0 1px, rgba(0,0,0,0) 1px 3px)",
+      animation:"crtRoll 10s linear infinite",willChange:"transform"}}/>
+    {/* aperture grille — static, cheap */}
+    <div style={{position:"absolute",inset:0,opacity:.07,
+      background:"repeating-linear-gradient(90deg, rgba(255,45,123,.7) 0 1px, rgba(0,229,255,.7) 1px 2px, rgba(0,0,0,0) 2px 3px)"}}/>
+    {/* chromatic fringe at the tube edges */}
+    <div style={{position:"absolute",inset:0,opacity:.34,willChange:"transform",
+      background:`radial-gradient(120% 92% at -10% 50%, ${C.pink}3a, transparent 40%), radial-gradient(120% 92% at 110% 50%, ${C.blue}3a, transparent 40%)`,
+      animation:"aberrJit 3.7s ease-in-out infinite"}}/>
+    {/* district bloom off the top of the frame */}
+    <div style={{position:"absolute",left:0,right:0,top:0,height:"30%",opacity:.3,
+      background:`linear-gradient(180deg, ${color}44, transparent)`,
+      animation:"bloomBreath 6.5s ease-in-out infinite"}}/>
+    {/* vignette + tube curvature */}
+    <div style={{position:"absolute",inset:0,
+      background:`radial-gradient(132% 108% at 50% 46%, transparent 42%, rgba(0,0,0,${night?".5":".4"}) 78%, rgba(0,0,0,.84) 100%)`}}/>
+    <div style={{position:"absolute",inset:-2,borderRadius:16,
+      boxShadow:"inset 0 0 90px rgba(0,0,0,.62), inset 0 0 12px rgba(0,0,0,.9)"}}/>
+    {/* tracking glitch — one node, offscreen 90% of the time */}
+    <div style={{position:"absolute",left:"-6%",right:"-6%",height:26,willChange:"transform",
+      background:"linear-gradient(180deg, rgba(0,0,0,0), rgba(255,255,255,.42), rgba(0,229,255,.3), rgba(0,0,0,0))",
+      animation:"trackGlitch 13s linear 4s infinite"}}/>
+    {/* heat haze — only once the city starts cooking */}
+    {k>.42&&<div style={{position:"absolute",left:0,right:0,bottom:0,height:"64%",willChange:"transform",
+      opacity:CL((k-.42)*1.4,0,.9),
+      background:"repeating-linear-gradient(0deg, rgba(255,110,50,.10) 0 2px, rgba(0,0,0,0) 2px 7px)",
+      animation:"hazeWave 2.6s ease-in-out infinite"}}/>}
+    {/* red/blue strobe — they are on the block */}
+    {k>=.7&&<>
+      <div style={{position:"absolute",inset:0,background:"linear-gradient(90deg, rgba(255,23,51,.36), transparent 48%)",animation:"strobeL 1.5s linear infinite"}}/>
+      <div style={{position:"absolute",inset:0,background:`linear-gradient(270deg, ${C.blue}55, transparent 48%)`,animation:"strobeR 1.5s linear infinite"}}/>
+      <div style={{position:"absolute",inset:0,boxShadow:`inset 0 0 60px rgba(255,23,51,.35)`}}/>
+    </>}
+  </div>);
+});
+
+// ── district arrival wash — keyed on g.loc, replays on every move ──
+const DistrictWash=memo(({color})=>(
+  <div style={{position:"fixed",inset:0,zIndex:38,pointerEvents:"none",overflow:"hidden"}}>
+    <div style={{position:"absolute",inset:0,animation:"washTint .9s ease-out forwards",
+      background:`linear-gradient(180deg, ${color}33, transparent 48%, ${color}26)`}}/>
+    <div style={{position:"absolute",top:0,bottom:0,left:0,width:"32%",willChange:"transform",
+      background:`linear-gradient(90deg, transparent, ${color}55, rgba(255,255,255,.16), ${color}55, transparent)`,
+      animation:"washSweep .8s cubic-bezier(.4,0,.2,1) forwards"}}/>
+  </div>
+));
 
 const TravelOverlay=({from,to,car,boat})=>{
   const L=LOCS[to], F=LOCS[from];
@@ -2584,6 +3648,72 @@ const ComicScreen=({idx,onTap,onSkip})=>{
   );
 };
 
+// ═══════════════════════════════════════════════════════════════
+// TITLE TREATMENT — neon tube logo + atmosphere bed
+// ═══════════════════════════════════════════════════════════════
+const TitleLogo=()=>(
+  <div style={{position:"relative",display:"inline-block",lineHeight:1.04,padding:"0 2px"}}>
+    {/* bloom ghost sitting behind the tube */}
+    <span aria-hidden="true" style={{position:"absolute",left:2,top:0,whiteSpace:"nowrap",
+      fontFamily:ft,fontWeight:"bold",fontSize:46,letterSpacing:3,color:C.pink,
+      filter:"blur(9px)",animation:"logoHum 3.8s ease-in-out infinite",pointerEvents:"none"}}>COCAINE</span>
+    {/* the tube itself */}
+    <span style={{position:"relative",display:"inline-block",whiteSpace:"nowrap",
+      fontFamily:ft,fontWeight:"bold",fontSize:46,letterSpacing:3,color:"#FFF1F7",
+      WebkitTextStroke:`1.1px ${C.pink}`,
+      textShadow:`0 0 5px #fff, 0 0 13px ${C.pink}, 0 0 32px ${C.pink}cc, 0 0 64px ${C.pink}66`,
+      animation:"logoBuzz 5.4s linear infinite"}}>COCAINE</span>
+    {/* glass shine sweeping the tube */}
+    <span style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none"}}>
+      <span style={{position:"absolute",top:0,bottom:0,left:0,width:"34%",display:"block",
+        background:"linear-gradient(90deg, transparent, rgba(255,255,255,.20), transparent)",
+        animation:"shineSweep 5s ease-in-out 1.4s infinite"}}/>
+    </span>
+  </div>
+);
+
+// Two sibling roots on purpose: the bed sits UNDER the title content (z 0),
+// the CRT glass sits OVER it (z 9). One wrapper could not do both.
+const TitleFX=()=>(<>
+  <div style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none",zIndex:0}}>
+    {/* low fog banks rolling across the middle distance */}
+    <div style={{position:"absolute",left:"-20%",right:"-20%",top:"38%",height:70,willChange:"transform",
+      background:`radial-gradient(60% 100% at 30% 50%, ${C.purple}44, transparent 70%), radial-gradient(50% 100% at 78% 50%, ${C.pink}33, transparent 70%)`,
+      filter:"blur(14px)",animation:"fogRoll 22s ease-in-out infinite alternate"}}/>
+    <div style={{position:"absolute",left:"-20%",right:"-20%",top:"52%",height:56,willChange:"transform",
+      background:`radial-gradient(55% 100% at 62% 50%, ${C.blue}33, transparent 72%)`,
+      filter:"blur(16px)",animation:"fogRoll 31s ease-in-out 3s infinite alternate-reverse"}}/>
+    {/* neon horizon line where the grid floor begins */}
+    <div style={{position:"absolute",left:0,right:0,bottom:"34%",height:2,background:C.pink,opacity:.85,
+      boxShadow:`0 0 10px ${C.pink}, 0 0 30px ${C.pink}, 0 0 70px ${C.pink}88`}}/>
+    <div style={{position:"absolute",left:0,right:0,bottom:"34%",height:60,
+      background:`linear-gradient(180deg, ${C.pink}33, transparent)`,opacity:.5}}/>
+    {/* foreground palm silhouettes */}
+    <svg viewBox="0 0 60 120" style={{position:"absolute",left:-6,bottom:0,width:112,height:224,opacity:.92,
+      transformOrigin:"50% 100%",animation:"palmSway 7s ease-in-out infinite"}}>
+      <path fill="#03060E" d="M30 120 q3 -46 1 -70 q14 6 20 -3 q-12 1 -17 -5 q14 -3 17 -12 q-14 3 -20 0 q3 -12 12 -15 q-14 0 -17 9 q-4 -9 -15 -11 q8 5 9 15 q-9 -3 -17 2 q10 3 17 9 q-10 4 -16 1 q7 10 19 7 q-3 17 0 73 Z"/>
+    </svg>
+    <svg viewBox="0 0 60 120" style={{position:"absolute",right:-10,bottom:0,width:96,height:192,opacity:.9,
+      transform:"scaleX(-1)",transformOrigin:"50% 100%",animation:"palmSway 9s ease-in-out 1.5s infinite"}}>
+      <path fill="#03060E" d="M30 120 q3 -42 1 -64 q13 6 19 -3 q-11 1 -16 -5 q13 -3 16 -11 q-13 3 -19 0 q3 -11 11 -14 q-13 0 -16 8 q-4 -8 -14 -10 q7 5 8 14 q-8 -3 -16 2 q9 3 16 8 q-9 4 -15 1 q7 9 18 6 q-3 16 0 68 Z"/>
+    </svg>
+  </div>
+  {/* CRT glass, over the title content */}
+  <div style={{position:"absolute",inset:0,overflow:"hidden",pointerEvents:"none",zIndex:9}}>
+    <div style={{position:"absolute",left:0,right:0,top:"-100%",height:"300%",opacity:.42,willChange:"transform",
+      background:"repeating-linear-gradient(0deg, rgba(0,0,0,.3) 0 1px, rgba(0,0,0,0) 1px 3px)",
+      animation:"crtRoll 12s linear infinite"}}/>
+    <div style={{position:"absolute",inset:0,opacity:.3,willChange:"transform",
+      background:`radial-gradient(120% 92% at -10% 50%, ${C.pink}3a, transparent 40%), radial-gradient(120% 92% at 110% 50%, ${C.blue}3a, transparent 40%)`,
+      animation:"aberrJit 3.7s ease-in-out infinite"}}/>
+    <div style={{position:"absolute",inset:0,
+      background:"radial-gradient(122% 102% at 50% 42%, transparent 42%, rgba(0,0,0,.58) 100%)"}}/>
+    <div style={{position:"absolute",left:"-6%",right:"-6%",height:24,willChange:"transform",
+      background:"linear-gradient(180deg, rgba(0,0,0,0), rgba(255,255,255,.32), rgba(0,229,255,.22), rgba(0,0,0,0))",
+      animation:"trackGlitch 9s linear 2s infinite"}}/>
+  </div>
+</>);
+
 const TitleScreen=({meta,cfg,setCfg,onPlay,onSafehouse,onLedger,onSound})=>{
   const pb=PLAYBOOKS[cfg.pb];
   const dailyInfo=getDailySeed();
@@ -2593,14 +3723,15 @@ const TitleScreen=({meta,cfg,setCfg,onPlay,onSafehouse,onLedger,onSound})=>{
     <div style={{minHeight:"100dvh",background:`linear-gradient(180deg, #12082E 0%, #2A0E45 30%, ${C.midnight} 62%)`,
       display:"flex",flexDirection:"column",alignItems:"center",padding:"34px 16px 90px",position:"relative",overflow:"hidden"}}>
       {/* synthwave grid floor */}
+<TitleFX/>
       <div style={{position:"absolute",left:"-30%",right:"-30%",bottom:0,height:"34%",transform:"perspective(220px) rotateX(58deg)",transformOrigin:"bottom",
         background:`repeating-linear-gradient(0deg, ${C.pink}33 0 2px, transparent 2px 44px), repeating-linear-gradient(90deg, ${C.pink}33 0 2px, transparent 2px 44px)`,
         animation:"gridScroll 2.4s linear infinite",maskImage:"linear-gradient(0deg, transparent, #000 70%)"}}/>
-      <div style={{position:"absolute",top:0,left:0,right:0,opacity:.5,maskImage:"linear-gradient(180deg,#000 30%,transparent 100%)",WebkitMaskImage:"linear-gradient(180deg,#000 30%,transparent 100%)"}}>
-        <MiamiSky move={0} heat={0} locColor={C.pink} locIdx={0}/>
+      <div style={{position:"absolute",top:0,left:0,right:0,opacity:.62,maskImage:"linear-gradient(180deg,#000 48%,transparent 100%)",WebkitMaskImage:"linear-gradient(180deg,#000 48%,transparent 100%)"}}>
+        <MiamiSkyDeluxe move={2} heat={0} locColor={C.pink} locIdx={0} plain/>
       </div>
       <div style={{position:"relative",textAlign:"center",marginBottom:6}}>
-        <Neon color={C.pink} size={42} flicker>COCAINE</Neon>
+        <TitleLogo/>
         <div style={{fontFamily:ft,fontWeight:"bold",fontSize:58,letterSpacing:6,lineHeight:1,
           background:`linear-gradient(180deg,#fff 12%, ${C.blue} 38%, #0A2A55 50%, ${C.blue} 60%, #fff 90%)`,
           WebkitBackgroundClip:"text",WebkitTextFillColor:"transparent",
@@ -3038,7 +4169,7 @@ export default function Cocaine80s(){
       else if(e.type==="HITSTOP"){ setHitstop(true); setTimeout(()=>setHitstop(false),130); }
       else if(e.type==="SCREEN") setScreen(e.screen);
       else if(e.type==="PING"){ if(e.stat==="hp"){ setFlash("#FF173328"); setTimeout(()=>setFlash(null),320); } }
-      else if(e.type==="ERA_SHIFT") setEraOv(ERAS[e.eraIdx]);
+      else if(e.type==="ERA_SHIFT"){ setEraOv(ERAS[e.eraIdx]); if(meta.sound) SFX.era(); }
       else if(e.type==="GAME_OVER") over=e.ending;
       else if(e.type==="CASHFLY") spawnFly(e.count);
       else if(e.type==="BREAKDOWN"){ setBreakdown(e.data); setTimeout(()=>setBreakdown(null),2700); }
@@ -3092,7 +4223,10 @@ export default function Cocaine80s(){
       if(g.ending==="escape"||g.ending==="kingpin"){ m.wins=meta.wins+1; m.winStreak=(meta.winStreak||0)+1; m.maxHeatBeaten=Math.max(meta.maxHeatBeaten??-1,g.heatLevel||0); }
       else m.winStreak=0;
       saveMeta(m); setMeta(m); setRepEarned(rep);
-      if(meta.sound)(g.ending==="escape"||g.ending==="kingpin"?SFX.sellMassive:SFX.police)();
+      if(meta.sound){ MUSIC.stop();
+        (g.ending==="escape"||g.ending==="kingpin"?SFX.endingWin:SFX.endingLose)();
+        newAch.forEach((_,i)=>setTimeout(()=>{ if(!AUDIO.isMuted()) SFX.achievement(i); },1300+i*760));
+      }
     }
   },[screen]);
 
@@ -3100,15 +4234,50 @@ export default function Cocaine80s(){
   useEffect(()=>{
     if(screen==="game"&&meta.sound){
       synth.current=new SynthLoop();
-      synth.current.start(()=>({era:gRef.current?.currentEra||0,heat:gRef.current?.fedHeat||0,loc:gRef.current?.loc||0}));
+      synth.current.start(()=>{ const s=gRef.current||{};
+        return { era:s.currentEra||0, heat:s.fedHeat||0, loc:s.loc||0,
+                 night:(s.move||0)%2===1, move:s.move||0, deals:s.totalDeals||0 }; });
       return ()=>synth.current&&synth.current.stop();
     }
   },[screen,meta.sound]);
 
+  // ── audio lifecycle: gesture unlock, mute, tab-hide suspend ──
+  useEffect(()=>{ AUDIO.setMuted(!meta.sound); },[meta.sound]);
+  useEffect(()=>{
+    if(typeof window==="undefined") return;
+    const onGesture=()=>AUDIO.unlock();
+    const onVis=()=>AUDIO.setHidden(!!document.hidden);
+    window.addEventListener("pointerdown",onGesture,{passive:true});
+    window.addEventListener("keydown",onGesture);
+    document.addEventListener("visibilitychange",onVis);
+    return ()=>{
+      window.removeEventListener("pointerdown",onGesture);
+      window.removeEventListener("keydown",onGesture);
+      document.removeEventListener("visibilitychange",onVis);
+      MUSIC.stop();
+    };
+  },[]);
+
+  // title-screen theme — slow, wet, drumless. Owner-guarded so it can never
+  // collide with the in-game transport during a screen change.
+  useEffect(()=>{
+    if(screen==="title"&&meta.sound){
+      MUSIC.start(()=>({scene:"title",era:0,heat:6,loc:0,night:true}),"title");
+      return ()=>MUSIC.stop("title");
+    }
+  },[screen,meta.sound]);
+
+  // dialogue chime when a storylet opens
+  const lastStoryId=useRef(null);
+  useEffect(()=>{
+    const id=g&&g.activeStorylet?g.activeStorylet.id:null;
+    if(id&&id!==lastStoryId.current&&meta.sound) SFX.storylet();
+    lastStoryId.current=id;
+  },[g&&g.activeStorylet?g.activeStorylet.id:null,meta.sound]);
   // low drone under the police stop
   useEffect(()=>{
     if(screen==="police"&&meta.sound){
-      const t=setInterval(()=>{ tone(55,.55,"sine",.05); tone(58,.55,"sine",.03); },600);
+      const t=setInterval(SFX.chaseBed,900); SFX.chaseBed();
       return ()=>clearInterval(t);
     }
   },[screen,meta.sound]);
@@ -3142,7 +4311,7 @@ export default function Cocaine80s(){
     const useCar=g.lifestyle.includes("car");
     const useBoat=dest===5&&(g.lifestyle.includes("boat")||!!g.importBonus);
     setTravelOv({from:fromLoc,to:dest,car:useCar,boat:useBoat});
-    if(meta.sound){ tone(useBoat?90:130,.55,"sawtooth",.05,0,useCar?260:150); tone(60,.5,"sine",.04); }
+    if(meta.sound) SFX.travelMove(useCar,useBoat);
     const driveMs=useCar&&!useBoat?640:940;
     setTimeout(()=>{
       const res=act(processTravel,dest);
@@ -3294,7 +4463,7 @@ export default function Cocaine80s(){
       animation:shake?"shakeA .42s ease":"none",paddingBottom:74}}>
 
       {/* ── LIVING SKYLINE HEADER ── */}
-      <MiamiSky move={g.move} heat={g.fedHeat} locColor={loc.color} locIdx={g.loc}/>
+      <MiamiSkyDeluxe move={g.move} heat={g.fedHeat} locColor={loc.color} locIdx={g.loc}/>
       <div style={{position:"fixed",inset:0,zIndex:1,pointerEvents:"none",background:`linear-gradient(180deg, ${era.color}10 0%, transparent 34%)`}}/>
       <div style={{padding:"8px 12px 0"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
@@ -3367,7 +4536,7 @@ export default function Cocaine80s(){
                 animation:`riseIn .3s ${i*.04}s ease both`,
                 border:`1px solid ${selDrug===i?loc.color:owned>0?C.gold+"55":C.border}`}}
               onClickCapture={()=>setSheetExit(false)}>
-              <span style={{fontSize:22}}>{d.emoji}</span>
+              <DrugGlyph d={d} owned={owned} sel={selDrug===i}/>
               <div style={{flex:1}}>
                 <div style={{fontFamily:ft,fontSize:13,fontWeight:"bold",color:C.text}}>{d.name}
                   {owned>0&&<span style={{color:C.gold,fontSize:10}}> ×{owned}</span>}
@@ -3392,7 +4561,7 @@ export default function Cocaine80s(){
                   💰SELL ×{owned}</span>
                 :<span style={{fontFamily:ft,fontSize:10,fontWeight:"bold",padding:"3px 7px",borderRadius:10,
                   background:C.pink+"22",color:C.pink}}>{FM(profit)}/u</span>)}
-              <Sparkline data={g.hist[i]} color={loc.color}/>
+              <SparkPro data={g.hist[i]} color={loc.color} avg={owned>0?g.avgCost[i]:0}/>
               <div style={{textAlign:"right",minWidth:64}}>
                 <PriceCell value={g.prices[i]}/>
                 <TrendArrow hist={g.hist[i]}/>
@@ -3515,6 +4684,7 @@ export default function Cocaine80s(){
       {eraOv&&<EraTakeover era={eraOv} onDone={()=>setEraOv(null)}/>}
       {dealScene&&<DealSceneFX d={dealScene}/>}
       {breakdown&&<SaleBreakdown d={breakdown}/>}
+      <DistrictWash key={"w"+g.loc} color={loc.color}/>
       <FlightLayer flights={flights}/>
 
       {/* floating numbers */}
@@ -3526,7 +4696,7 @@ export default function Cocaine80s(){
       </div>
       {flash&&<div style={{position:"fixed",inset:0,zIndex:52,pointerEvents:"none",background:flash,animation:"flashFade .38s ease forwards"}}/>}
       {hitstop&&<div style={{position:"fixed",inset:0,zIndex:52,pointerEvents:"none",background:"radial-gradient(ellipse, transparent 40%, #ffffff33 100%)"}}/>}
-      <div style={{position:"fixed",inset:0,zIndex:2,pointerEvents:"none",opacity:.5,background:"repeating-linear-gradient(0deg, rgba(0,0,0,.09) 0 1px, transparent 1px 3px)"}}/>
+      <CRTOverlay heat={g.fedHeat} color={loc.color} night={night}/>
       {g.streak>=3&&<div style={{position:"fixed",inset:0,zIndex:3,pointerEvents:"none",
         animation:`streakBorder 1.4s ease-in-out infinite${g.streak>=6?", rainbowB 3s linear infinite":""}`}}/>}
     </div>
