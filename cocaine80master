@@ -2089,7 +2089,7 @@ const StoryScene=({story,g,sound,onApply,onClose})=>{
               <div style={{fontFamily:fb,fontSize:14.5,lineHeight:1.55,color:C.text,fontStyle:"italic"}}>
                 {reaction
                   ?<TypeText key={"rx"} text={reaction.text} sound={sound} onDone={()=>{}} instant={false}/>
-                  :<TypeText key={idx} text={cur.text} sound={sound} instant={instant} onDone={()=>setTyped(true)}/>}
+                  :<TypeText key={idx} text={cur?.text||""} sound={sound} instant={instant} onDone={()=>setTyped(true)}/>}
               </div>
             </div>
           </div>
@@ -3499,7 +3499,7 @@ export default function Cocaine80s(){
       </div>
 
       {/* ── OVERLAYS ── */}
-      {g.activeStorylet&&<StoryScene story={g.activeStorylet} g={g} sound={meta.sound}
+      {g.activeStorylet&&<StoryScene key={g.activeStorylet.id} story={g.activeStorylet} g={g} sound={meta.sound}
         onApply={(ns,ch)=>{ setG({...ns,activeStorylet:g.activeStorylet});
           if(meta.sound)SFX.coin();
           if(ch.effects&&ch.effects.cashDelta>0){ addPart(`+${FM(ch.effects.cashDelta)}`,C.green,.42); spawnFly(8); } }}
