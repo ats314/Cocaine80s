@@ -272,6 +272,637 @@ const calcTxRisk=(amt,baseRisk,eraCopsMod)=>{
 const calcLegalFees=(txValue,eraPenaltyMod,mod=1)=>Math.max(100,Math.floor((txValue*0.2*eraPenaltyMod+R(200,800))*mod));
 const getEra=s=>ERAS[s.currentEra||0];
 
+// ═══════════════════════════════════════════════════════════════
+// LIVING CITY ENGINE — pure. Per-district demand, telegraphed supply
+// shocks, patrol pressure, informants, crew loyalty, laundering, and
+// a rival kingpin who plays the whole game against you.
+// Every function takes state and returns new state or plain data.
+// ═══════════════════════════════════════════════════════════════
+const LOC_COUNT=LOCS.length;
+
+const MKT={
+  sellHit:0.009, buyDrain:0.005, demFloor:0.40, demCeil:1.45, recover:0.16,
+  mktLo:0.30, mktHi:2.40,
+  shockChance:0.26, shockCap:3,
+  patrolMax:6, patrolDecay:0.55, patrolPerTrade:0.7,
+  infMax:5, infGain:0.50, infDecay:0.20,
+  wireKeep:6,
+};
+
+const initLocDemand=()=>LOCS.map(()=>DRUGS.map(()=>1));
+const initPatrols=()=>LOCS.map(l=>Math.round(l.heat*100)/10);
+const initInformants=()=>LOCS.map(()=>0);
+const initRival=()=>({ power:5, cash:30000, heat:0, truce:0, confront:0, broken:false,
+  flood:null, hitFuse:0, raids:0, lastAction:"build",
+  lastText:"Counting money somewhere south of you." });
+const pushWire=(wire,item)=>[item,...(wire||[])].slice(0,MKT.wireKeep);
+
+// ── SUPPLY SHOCKS — announced one move before they land ──
+const SHOCK_KINDS=[
+  { kind:"spike", icon:"🚢", mult:[1.45,2.05],
+    warn:"WIRE: Coast Guard is staging cutters off {L}. {D} there gets thin by morning.",
+    landed:"Interdiction off {L} — {D} is scarce and expensive." },
+  { kind:"spike", icon:"🚔", mult:[1.40,1.90],
+    warn:"WIRE: Vice is prepping a sweep in {L}. Every connect there will sit on their hands.",
+    landed:"Vice swept {L}. {D} is hard to find at any price." },
+  { kind:"spike", icon:"🎉", mult:[1.35,1.75],
+    warn:"WIRE: A convention books out {L} this week. Somebody there is going to want {D}.",
+    landed:"{L} is full of out-of-towners. {D} moves at a premium." },
+  { kind:"crash", icon:"📦", mult:[0.52,0.72],
+    warn:"WIRE: A go-fast unloads tonight. {D} is about to flood {L}.",
+    landed:"{D} is everywhere in {L}. Buyers are picky and prices are ugly." },
+  { kind:"crash", icon:"🇨🇴", mult:[0.48,0.68],
+    warn:"WIRE: The cartel is clearing inventory before the season. {D} will crater in {L}.",
+    landed:"Cartel dumping killed the {D} price in {L}." },
+  { kind:"crash", icon:"⚔", mult:[0.55,0.78],
+    warn:"WIRE: Two crews in {L} are undercutting each other over {D}. It gets cheap before it gets bloody.",
+    landed:"Price war on {D} in {L}. Cheap to buy. Miserable to sell." },
+];
+const rollShock=()=>{
+  const t=SHOCK_KINDS[R(0,SHOCK_KINDS.length-1)];
+  const drug=R(0,DRUG_COUNT-1);
+  const citywide=Math.random()<0.22;
+  const loc=citywide?-1:R(0,LOC_COUNT-1);
+  const where=citywide?"Miami":LOCS[loc].name;
+  const fill=str=>str.replace("{D}",DRUGS[drug].name).replace("{L}",where);
+  return { kind:t.kind, icon:t.icon, drug, loc, pending:true, moves:R(2,4),
+    mult:Math.round(RF(t.mult[0],t.mult[1])*100)/100,
+    warn:fill(t.warn), landed:fill(t.landed) };
+};
+
+// ── MARKET MICROSTRUCTURE ──
+// Local demand (what THIS district will still absorb), live shocks and the
+// rival flooding a corner all fold into one capped multiplier per drug.
+const shockMultAt=(shocks,loc,drugIdx)=>{
+  let m=1;
+  for(const sk of (shocks||[])){
+    if(sk.pending||sk.drug!==drugIdx) continue;
+    if(sk.loc>=0&&sk.loc!==loc) continue;
+    m*=sk.mult;
+  }
+  return m;
+};
+const marketMult=(s,loc,drugIdx)=>{
+  const row=(s.locDemand||[])[loc];
+  let m=row?CL(row[drugIdx],MKT.demFloor,MKT.demCeil):1;
+  m*=shockMultAt(s.shocks,loc,drugIdx);
+  const fl=s.rival&&s.rival.flood;
+  if(fl&&fl.loc===loc&&fl.drug===drugIdx&&(s.move||0)<fl.until) m*=0.84;
+  return CL(m,MKT.mktLo,MKT.mktHi);
+};
+// Mutates the freshly generated price row in place so history, sparklines,
+// buy price and sell price all agree. Called once per travel.
+const applyMarketPrices=(s,loc,prices)=>{
+  for(let i=0;i<prices.length;i++)
+    prices[i]=Math.max(DRUGS[i].min,Math.round(prices[i]*marketMult(s,loc,i)));
+  return prices;
+};
+// Every trade moves the district: dumping saturates it, buying it out
+// tightens it, and volume anywhere pulls patrol cars and then informants.
+const tradeMarketPatch=(s,drugIdx,amt,kind)=>{
+  const loc=s.loc;
+  const locDemand=(s.locDemand||initLocDemand()).map(r=>[...r]);
+  const patrols=[...(s.patrols||initPatrols())];
+  const informants=[...(s.informants||initInformants())];
+  const districtSales=[...(s.districtSales||LOCS.map(()=>0))];
+  const cur=locDemand[loc][drugIdx];
+  if(kind==="sell"){
+    locDemand[loc][drugIdx]=CL(cur*(1-Math.min(0.5,amt*MKT.sellHit)),MKT.demFloor,MKT.demCeil);
+    districtSales[loc]=(districtSales[loc]||0)+amt;
+  } else {
+    locDemand[loc][drugIdx]=CL(cur*(1+Math.min(0.35,amt*MKT.buyDrain)),MKT.demFloor,MKT.demCeil);
+  }
+  const w=amt>=20?1:amt>=10?0.6:amt>=5?0.3:0.1;
+  patrols[loc]=CL(patrols[loc]+w*MKT.patrolPerTrade,0,MKT.patrolMax);
+  if(patrols[loc]>=2.6&&amt>=6)
+    informants[loc]=CL(informants[loc]+MKT.infGain*(kind==="sell"?1:0.6),0,MKT.infMax);
+  return { locDemand, patrols, informants, districtSales };
+};
+
+// ── RISK YOU CAN READ AND PLAN AROUND ──
+const districtRisk=(s,loc)=>{
+  const p=(s.patrols||[])[loc]||0, inf=(s.informants||[])[loc]||0;
+  const den=((s.safeHouses||[])[loc]>=0)?0.88:1;
+  const crew=Math.min(0.15,((s.enforcers||[])[loc]||0)*0.05);
+  return CL((1+p*0.11+inf*0.16)*den*(1-crew),0.55,2.40);
+};
+// Exactly mirrors the heat math in processTravel, so the number the player
+// is shown is the number they will get.
+const heatAt=(s,loc)=>{
+  const used=(s.inv||[]).reduce((a,b)=>a+b,0);
+  const hc=used>50?3:used>20?2:used>0?0:-1;
+  const passive=used===0?3:0;
+  const sh=(s.safeHouses||[])[loc];
+  let decay=(sh>=0?SAFE_HOUSES[sh].heatDecay:0)+((s.lifestyle||[]).includes("rolex")?2:0);
+  if(s.dailyHeatDecayMod) decay*=s.dailyHeatDecayMod;
+  const floor=Math.floor((s.totalProfit||0)/50000)+Math.floor((s.totalBusts||0)*3);
+  return { next:Math.round(CL(Math.max(s.fedHeat+hc-decay-passive,floor),0,100)), floor };
+};
+
+// ── EMPIRE ECONOMICS — income you can strangle, upkeep that escalates ──
+const empireIncome=s=>(s.turf||[]).reduce((sum,lv,i)=>{
+  if(!lv) return sum;
+  const row=(s.locDemand||[])[i];
+  const sat=row?CL(row.reduce((a,b)=>a+b,0)/DRUG_COUNT,0.55,1.12):1;
+  const pat=CL(1-((s.patrols||[])[i]||0)*0.06,0.66,1);
+  const loy=CL((((s.enfLoyalty||[])[i])??100)/100,0.5,1.1);
+  const held=((s.enforcers||[])[i]||0)>0?1:0.78;
+  const col=((s.colTurf||[])[i]&&!(s.storyFlags||{}).col_peace)?0.8:1;
+  return sum+Math.round(TURF_LEVELS[lv].income*CL(sat*pat*loy*held*col,0.35,1.12));
+},0);
+const crewUpkeep=s=>(s.enforcers||[]).reduce(
+  (sum,e)=>sum+e*Math.round(ENFORCER_UPKEEP*(1+(s.currentEra||0)*0.15)),0);
+const strengthOf=s=>Math.round((s.enforcers||[]).reduce((a,b)=>a+b,0)*2
+  +(s.gun?4:0)+((s.cred||0)/12)+(s.turf||[]).filter(t=>t>0).length*2);
+
+// ── LAUNDERING — clean money is safe and useless; dirty money is neither ──
+const LAUNDER_CHANNELS=[
+  { id:"cambio", name:"Casa de Cambio", icon:"💱", fee:0.20, cap:8000, risk:0,
+    desc:"A window on Flagler that turns anything into anything. The rate is robbery. Nobody asks.",
+    need:()=>true },
+  { id:"club", name:"Door Receipts", icon:"🪩", fee:0.09, cap:14000, risk:0.07,
+    desc:"The club reports a very good night. Every night. Auditors love a pattern.",
+    need:s=>(s.lifestyle||[]).includes("club") },
+  { id:"marina", name:"Charter Fleet", icon:"🚤", fee:0.13, cap:22000, risk:0.11,
+    desc:"Charters out of Dinner Key that never leave the dock. Customs boards boats on slow afternoons.",
+    need:s=>(s.lifestyle||[]).includes("boat")||!!s.importBonus },
+  { id:"cass", name:"Cass's Network", icon:"🏦", fee:0.11, cap:45000, risk:0.05,
+    desc:"Shells, a marina, two funeral homes. Paper trails have authors, and authors have memories.",
+    need:s=>!!(s.storyFlags||{}).cass_network&&!(s.storyFlags||{}).cass_burned },
+];
+const launderUsed=(s,id)=>(s.launderMove===s.move)?(((s.launderUse||{})[id])||0):0;
+const launderCap=(s,ch)=>Math.max(0,ch.cap-launderUsed(s,ch.id));
+
+function processLaunder(s,channelId,amount){
+  const ch=LAUNDER_CHANNELS.find(c=>c.id===channelId);
+  if(!ch||!ch.need(s)) return { state:s, ok:false };
+  const amt=Math.min(Math.floor(amount||0),s.cash,launderCap(s,ch));
+  if(amt<500) return { state:s, ok:false };
+  const fee=Math.floor(amt*ch.fee), clean=amt-fee;
+  const use={...((s.launderMove===s.move)?(s.launderUse||{}):{})};
+  use[ch.id]=(use[ch.id]||0)+amt;
+  const effects=[{type:"SFX",name:"coin"},{type:"SPAWN",text:`✨ ${FM(clean)} CLEAN`,color:C.gold,y:.46}];
+  let npcState=s.npcState, wire=s.newsWire;
+  if(ch.risk&&Math.random()<ch.risk){
+    npcState={...s.npcState, ramirez:{...s.npcState.ramirez,
+      evidence:CL((s.npcState.ramirez.evidence||0)+1,0,20)}};
+    wire=pushWire(wire,{icon:"🕵️",tone:"bad",move:s.move,
+      text:`The wash through ${ch.name} left a trail. Somebody photocopied it.`});
+    effects.push({type:"SPAWN",text:"🕵️ THE WASH LEFT A TRAIL (+1 EVIDENCE)",color:C.pink,y:.36},{type:"SHAKE"});
+  }
+  return { state:{...s, cash:s.cash-amt, cleanCash:(s.cleanCash||0)+clean, npcState, newsWire:wire,
+    launderMove:s.move, launderUse:use, launderedTotal:(s.launderedTotal||0)+amt}, ok:true, effects };
+}
+
+// ── STREET OPERATIONS — informants and crew are problems you can pay,
+//    threaten, or ignore, and each of those costs something different ──
+function processPayInformant(s,loc){
+  const inf=((s.informants||[])[loc])||0;
+  if(inf<1||s.loc!==loc) return { state:s, ok:false };
+  const cost=Math.floor(700+inf*1500+(s.totalProfit||0)*0.005);
+  if(s.cash<cost) return { state:s, ok:false };
+  const informants=[...s.informants]; informants[loc]=Math.max(0,inf-2.5);
+  return { state:{...s, cash:s.cash-cost, informants,
+    newsWire:pushWire(s.newsWire,{icon:"🤐",tone:"good",move:s.move,
+      text:`Somebody in ${LOCS[loc].name} decided they never saw you. ${FM(cost)}, well spent.`})},
+    ok:true, effects:[{type:"SFX",name:"coin"},{type:"SPAWN",text:`🤐 −${FM(cost)} SILENCE`,color:C.blue,y:.46}] };
+}
+function processLeanOnInformant(s,loc){
+  const inf=((s.informants||[])[loc])||0;
+  if(inf<1||s.loc!==loc) return { state:s, ok:false };
+  const power=((s.enforcers||[])[loc]||0)*2+(s.gun?2:0)+Math.floor(s.cred/25);
+  if(Math.random()<CL(0.22+power*0.09,0.22,0.88)){
+    const informants=[...s.informants]; informants[loc]=0;
+    return { state:{...s, informants, cred:CL(s.cred+2,0,100), fedHeat:CL(s.fedHeat+3,0,100),
+      newsWire:pushWire(s.newsWire,{icon:"👊",tone:"good",move:s.move,
+        text:`A short conversation in ${LOCS[loc].name}. The snitch has relatives in Georgia now.`})},
+      ok:true, effects:[{type:"SFX",name:"sellBig"},{type:"SHAKE"},
+        {type:"SPAWN",text:"👊 THE STREET GOT QUIET",color:C.orange,y:.46}] };
+  }
+  const npcState={...s.npcState, ramirez:{...s.npcState.ramirez,
+    evidence:CL((s.npcState.ramirez.evidence||0)+2,0,20)}};
+  const hp=CL(s.hp-R(6,14),0,100);
+  const effects=[{type:"SFX",name:"police"},{type:"SHAKE"},{type:"FLASH",color:C.pink+"55"},
+    {type:"PING",stat:"hp"},{type:"SPAWN",text:"🚨 WITNESSED (+2 EVIDENCE)",color:C.pink,y:.46}];
+  if(hp<=0) effects.push({type:"GAME_OVER",ending:"dead"});
+  return { state:{...s, npcState, hp, fedHeat:CL(s.fedHeat+8,0,100),
+    hudSeen:{...s.hudSeen,hp:true},
+    newsWire:pushWire(s.newsWire,{icon:"🚨",tone:"bad",move:s.move,
+      text:`It went badly in ${LOCS[loc].name}. There is a report with your description on it.`})},
+    ok:true, effects };
+}
+function processCrewBonus(s,loc){
+  const n=((s.enforcers||[])[loc])||0;
+  if(n<=0) return { state:s, ok:false };
+  const cost=n*900;
+  if(s.cash<cost) return { state:s, ok:false };
+  const enfLoyalty=[...(s.enfLoyalty||LOCS.map(()=>100))];
+  if(enfLoyalty[loc]>=98) return { state:s, ok:false };
+  enfLoyalty[loc]=CL(enfLoyalty[loc]+34,0,100);
+  return { state:{...s, cash:s.cash-cost, enfLoyalty, cred:CL(s.cred+1,0,100)}, ok:true,
+    effects:[{type:"SFX",name:"coin"},{type:"SPAWN",text:"👊 CREW PAID — LOYALTY UP",color:C.gold,y:.46}] };
+}
+
+// ── THE RIVAL KINGPIN ──
+// El Colombiano runs a parallel empire: he grows, floods your districts,
+// buys cops, raids your turf and escalates through three confrontations.
+function processSabotage(s){
+  const cost=6000, r=s.rival||initRival();
+  if(s.cash<cost||s.cred<25||r.broken) return { state:s, ok:false };
+  const rival={...r};
+  const npcState={...s.npcState, colombiano:{...s.npcState.colombiano, met:true}};
+  const odds=CL(0.35+s.cred/220+(s.enforcers||[]).reduce((a,b)=>a+b,0)*0.03,0.35,0.85);
+  if(Math.random()<odds){
+    rival.power=Math.max(3,Math.round((rival.power-3)*10)/10);
+    rival.cash=Math.max(0,rival.cash-8000);
+    return { state:{...s, cash:s.cash-cost, rival, npcState,
+      newsWire:pushWire(s.newsWire,{icon:"🔥",tone:"good",move:s.move,
+        text:"A Colombian stash house in Hialeah burned down. No insurance was carried."})},
+      ok:true, effects:[{type:"SFX",name:"sellBig"},{type:"SHAKE"},
+        {type:"SPAWN",text:"🔥 −3 RIVAL POWER",color:C.gold,y:.46}] };
+  }
+  npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-2,-10,10);
+  return { state:{...s, cash:s.cash-cost, rival, npcState, fedHeat:CL(s.fedHeat+6,0,100),
+    storyFlags:{...s.storyFlags,col_war:true},
+    newsWire:pushWire(s.newsWire,{icon:"🚨",tone:"bad",move:s.move,
+      text:"Your people got caught doing it. He knows who sent them."})},
+    ok:true, effects:[{type:"SFX",name:"police"},{type:"SHAKE"},
+      {type:"SPAWN",text:"🚨 IT WENT WRONG",color:C.pink,y:.46}] };
+}
+
+const buildRivalEvent=(level,st,rival)=>{
+  if(level>=3){
+    const mine=strengthOf(st), cost=Math.floor((st.cash+st.bank)*0.25);
+    return { kind:"rival", level:3, header:"THE RIVAL — ENDGAME", icon:"🛥", color:C.gold,
+      title:"THE LAST BOAT",
+      text:"He is loading a boat at a private dock in the Keys, which means he is either leaving or clearing space for something. His man calls your motel at midnight. \"He says you can come to the dock tonight. He says bring whatever you think you need.\"",
+      opts:[
+        { id:"assault", label:`🔫 TAKE THE DOCK — YOU ${mine} vs HIM ${Math.round(rival.power)}`, color:C.pink, cost:0,
+          note:`You need roughly ${Math.ceil(rival.power*0.8)} strength on the night — how hard you fight swings it by half, and luck does the rest. Win and his organization is yours. Lose and you crawl home short a district.` },
+        { id:"tribute_final", label:`💵 BUY PERMANENT PEACE — ${FM(cost)}`, color:C.gold, cost,
+          note:"He never touches you again. Your escape fund never recovers either." },
+        { id:"informant", label:"📞 HAND HIM TO RAMIREZ", color:C.blue, cost:0,
+          note:"He disappears tonight. So does 12 cred — and Ramirez now knows exactly who you are (+5 evidence)." },
+      ] };
+  }
+  if(level===2) return { kind:"rival", level:2, header:"THE RIVAL — THE SIT-DOWN", icon:"🗺", color:C.orange,
+    title:"THE SIT-DOWN",
+    text:"Two cars, one warehouse in Hialeah, nobody armed — officially. He has the map again and this time your name is written on part of it. \"We are past the part where one of us leaves,\" he says. \"Now we only choose HOW.\"",
+    opts:[
+      { id:"split", label:"🕊 SPLIT THE CITY", color:C.green, cost:0,
+        note:"Peace: his crews stop undercutting you and the raids stop. He keeps growing anyway." },
+      { id:"setup", label:"🕵️ GIVE RAMIREZ HIS ROUTE", color:C.blue, cost:0,
+        note:"Guts his organization. Ramirez gets your number with it (+2 evidence, and the file starts moving)." },
+      { id:"war", label:"⚔ NO DEAL — WAR", color:C.pink, cost:0,
+        note:"+6 cred. He commits everything to taking your blocks." },
+    ] };
+  const tcost=Math.floor((st.cash||0)*0.12);
+  return { kind:"rival", level:1, header:"THE RIVAL — THE OFFER", icon:"🥃", color:C.orange,
+    title:"THE OFFER",
+    text:"A waiter you did not order from sets down a rum you did not ask for. El Colombiano is two tables away, not looking at you. His man leaves a napkin with a number on it: what he thinks your week is worth. \"He is not asking for your city,\" the man says. \"Only rent.\"",
+    opts:[
+      { id:"tribute", label:`💵 PAY THE RENT — ${FM(tcost)}`, color:C.gold, cost:0,
+        note:"He stands down for eight moves. Your money buys his next block." },
+      { id:"buyoff", label:"🤝 BUY HIS LIEUTENANT — $12,000", color:C.blue, cost:12000,
+        note:"Might split his organization. Might fund the man who reports you." },
+      { id:"refuse", label:"🖕 SEND THE NAPKIN BACK", color:C.pink, cost:0,
+        note:"+4 cred. His crews start working your corners tomorrow." },
+    ] };
+};
+
+function resolveWorldEvent(s,ev,opt,skill=0.5){
+  const id=(opt&&opt.id)?opt.id:opt;
+  const rival={...(s.rival||initRival())};
+  const npcState={...s.npcState, colombiano:{...s.npcState.colombiano}, ramirez:{...s.npcState.ramirez}};
+  const storyFlags={...s.storyFlags};
+  const montage=[...(s.montage||[])];
+  const effects=[{type:"SFX",name:"click"}];
+  let cash=s.cash, bank=s.bank, hp=s.hp, cred=s.cred, evtMsg=null;
+  let colTurf=[...(s.colTurf||LOCS.map(()=>false))];
+  const turf=[...(s.turf||LOCS.map(()=>0))];
+  let wire=s.newsWire;
+  npcState.colombiano.met=true;
+
+  if(id==="tribute"){
+    const cost=Math.min(cash,Math.floor(cash*0.12));
+    cash-=cost; rival.cash+=cost; rival.power+=1.5; rival.truce=8;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)+1,-10,10);
+    cred=CL(cred-2,0,100);
+    evtMsg=`🇨🇴 You paid the rent — ${FM(cost)}. His crews will look through you for a while. Everybody else saw you pay.`;
+    montage.push({move:s.move,text:`Paid El Colombiano ${FM(cost)} in tribute.`});
+    effects.push({type:"SFX",name:"coin"},{type:"SPAWN",text:`−${FM(cost)} TRIBUTE`,color:C.pink,y:.46});
+    wire=pushWire(wire,{icon:"🇨🇴",tone:"info",move:s.move,text:"Word is you pay rent to the Colombians now."});
+  } else if(id==="buyoff"){
+    if(cash<12000) return { state:s, ok:false };
+    cash-=12000;
+    if(Math.random()<0.6){
+      rival.power=Math.max(4,rival.power-6); rival.cash=Math.max(0,rival.cash-9000);
+      evtMsg="🤝 His lieutenant took the envelope, and two weeks later took three crews with him. The Colombian is smaller today than he was yesterday.";
+      effects.push({type:"SFX",name:"sellBig"},{type:"SPAWN",text:"🤝 HIS ORGANIZATION SPLIT",color:C.gold,y:.46});
+      wire=pushWire(wire,{icon:"🤝",tone:"good",move:s.move,text:"A Colombian lieutenant left with three crews. Nobody is calling it a defection."});
+    } else {
+      npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-3,-10,10);
+      rival.hitFuse=s.move+2; storyFlags.col_war=true;
+      evtMsg="🤝 The lieutenant carried your money to his boss the same afternoon. You bought a $12,000 introduction to a grudge.";
+      effects.push({type:"SFX",name:"police"},{type:"SHAKE"},{type:"FLASH",color:C.pink+"44"});
+      wire=pushWire(wire,{icon:"🚗",tone:"bad",move:s.move,text:"You are being watched. He knows what you tried to buy."});
+    }
+  } else if(id==="refuse"){
+    cred=CL(cred+4,0,100); storyFlags.col_war=true;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-2,-10,10);
+    evtMsg="🖕 You sent the napkin back with the number crossed out. The waiter looked ill. El Colombiano laughed once and never looked at you again.";
+    effects.push({type:"SPAWN",text:"⭐ +4 CRED",color:C.gold,y:.46});
+  } else if(id==="split"){
+    storyFlags.col_peace=true; storyFlags.col_war=false;
+    rival.truce=14; rival.flood=null; rival.hitFuse=0;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)+2,-10,10);
+    evtMsg="🕊 Somebody drew a line through the map. His crews stop undercutting you tonight — and he keeps everything on his side of it, growing.";
+    montage.push({move:s.move,text:"Split Miami with El Colombiano at a sit-down."});
+    effects.push({type:"SFX",name:"coin"});
+  } else if(id==="setup"){
+    npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+2,0,20);
+    npcState.ramirez.met=true;
+    rival.power=Math.max(4,rival.power-9); rival.heat+=25; rival.cash=Math.max(0,rival.cash-15000);
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-3,-10,10);
+    storyFlags.col_war=true;
+    evtMsg="🕵️ Customs opened a container in Port Everglades that was never supposed to be opened. He lost a season. You lost deniability.";
+    effects.push({type:"SFX",name:"police"},{type:"SPAWN",text:"🕵️ −9 RIVAL POWER, +2 EVIDENCE",color:C.blue,y:.46});
+    wire=pushWire(wire,{icon:"🕵️",tone:"info",move:s.move,text:"A seizure at Port Everglades. Somebody talked. Two somebodies, actually."});
+  } else if(id==="war"){
+    cred=CL(cred+6,0,100); storyFlags.col_war=true; rival.power+=2;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-2,-10,10);
+    evtMsg="⚔ Nobody shook hands. Both cars left fast. By morning there were new crews on two of your corners.";
+    effects.push({type:"SFX",name:"police"},{type:"SPAWN",text:"⚔ WAR — +6 CRED",color:C.pink,y:.46});
+  } else if(id==="assault"){
+    const mine=Math.round(strengthOf(s)*(0.45+skill*1.10))+R(0,4);
+    if(mine>=rival.power*0.8){
+      const take=Math.floor(rival.cash*0.5);
+      cash+=take; cred=CL(cred+15,0,100);
+      colTurf=colTurf.map(()=>false);
+      rival.broken=true; rival.power=0; rival.cash=0; rival.flood=null; rival.hitFuse=0; rival.truce=999;
+      storyFlags.col_broken=true; storyFlags.col_war=false;
+      evtMsg=`👑 The dock burned for an hour. His people left in boats that were not his. ${FM(take)} came out of a safe that was. Miami is short one kingpin.`;
+      montage.push({move:s.move,text:"Took the dock. Broke El Colombiano."});
+      effects.push({type:"SFX",name:"sellMassive"},{type:"SHAKE"},{type:"FLASH",color:C.gold+"55"},
+        {type:"CASHFLY",count:14},{type:"SPAWN",text:"👑 HIS EMPIRE IS YOURS",color:C.gold,y:.42});
+      wire=pushWire(wire,{icon:"👑",tone:"good",move:s.move,text:"El Colombiano is finished. The corners are asking who to pay now."});
+    } else {
+      const loss=R(18,30); hp=CL(hp-loss,0,100);
+      const li=turf.map((t,i)=>t>0?i:-1).filter(i=>i>=0);
+      if(li.length){ const d=li[R(0,li.length-1)]; turf[d]=Math.max(0,turf[d]-1); }
+      npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-3,-10,10);
+      storyFlags.col_war=true; rival.power+=3; rival.truce=0;
+      evtMsg=`🔫 They were ready. Of course they were ready. −${loss} HP and a block you used to own.`;
+      effects.push({type:"SFX",name:"police"},{type:"SHAKE"},{type:"FLASH",color:C.pink+"66"},{type:"PING",stat:"hp"});
+      wire=pushWire(wire,{icon:"🔫",tone:"bad",move:s.move,text:"The dock was a trap. Everybody knew it but you."});
+    }
+  } else if(id==="tribute_final"){
+    let cost=Math.floor((cash+bank)*0.25);
+    const fromCash=Math.min(cash,cost); cash-=fromCash; cost-=fromCash;
+    bank=Math.max(0,bank-cost);
+    rival.truce=999; rival.power+=2; rival.flood=null; rival.hitFuse=0;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)+2,-10,10);
+    storyFlags.col_peace=true; storyFlags.col_war=false;
+    evtMsg="🕊 A quarter of everything bought a peace with no expiry date. He toasts you at the dock. You do not drink it.";
+    montage.push({move:s.move,text:"Bought a permanent peace from El Colombiano."});
+    effects.push({type:"SFX",name:"coin"},{type:"SPAWN",text:"🕊 PERMANENT PEACE",color:C.green,y:.46});
+  } else if(id==="informant"){
+    npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+5,0,20);
+    npcState.ramirez.met=true;
+    npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-4,-10,10);
+    cred=CL(cred-12,0,100);
+    rival.broken=true; rival.power=0; rival.flood=null; rival.hitFuse=0; rival.truce=999;
+    colTurf=colTurf.map(()=>false);
+    storyFlags.col_broken=true; storyFlags.became_informant=true;
+    evtMsg="📞 Federal agents took the dock at 4 AM. Ramirez did not thank you. He wrote your name down twice.";
+    montage.push({move:s.move,text:"Handed El Colombiano to Vice."});
+    effects.push({type:"SFX",name:"police"},{type:"FLASH",color:C.blue+"55"},
+      {type:"SPAWN",text:"📞 HE IS GONE — SO IS YOUR NAME",color:C.blue,y:.44});
+    wire=pushWire(wire,{icon:"📞",tone:"info",move:s.move,text:"A federal raid took the Keys dock. Somebody made a phone call."});
+  } else return { state:s, ok:false };
+
+  if(hp<=0) effects.push({type:"GAME_OVER",ending:"dead"});
+  return { state:{...s, cash:Math.max(0,cash), bank, hp, cred, turf, colTurf, rival, npcState, storyFlags,
+    montage, newsWire:wire, evtMsg:evtMsg||s.evtMsg,
+    hudSeen:{...s.hudSeen,hp:s.hudSeen.hp||hp<s.hp}}, ok:true, effects };
+}
+
+// ── THE WORLD TICK — one call per travel, after the state is assembled.
+//    Returns a patch (never mutates), effects, and any modal it wants raised.
+function worldTick(s,out,ctx){
+  const nm=out.move, destLoc=out.loc, era=getEra(out);
+  const effects=[], patch={};
+  let evtMsg=null, turfWar=null, worldEvent=null;
+  let wire=[...(s.newsWire||[])];
+  let cash=out.cash, bank=out.bank, hp=out.hp, cred=out.cred;
+  const npcState={...out.npcState, ramirez:{...out.npcState.ramirez}, colombiano:{...out.npcState.colombiano}};
+  const storyFlags={...out.storyFlags};
+  const colTurf=[...(out.colTurf||LOCS.map(()=>false))];
+  const enforcers=[...(out.enforcers||LOCS.map(()=>0))];
+  const turf=[...(out.turf||LOCS.map(()=>0))];
+
+  // 1 ── the districts breathe back toward normal
+  const locDemand=(s.locDemand||initLocDemand()).map(row=>row.map(v=>
+    Math.round(CL(v+(1-v)*MKT.recover,MKT.demFloor,MKT.demCeil)*1000)/1000));
+  const districtSales=(s.districtSales||LOCS.map(()=>0)).map(v=>Math.round(v*8.5)/10);
+
+  // 2 ── patrols chase your noise, informants forget slowly
+  const patrols=(s.patrols||initPatrols()).map((p,i)=>{
+    const base=Math.round(LOCS[i].heat*100)/10;
+    let v=p-MKT.patrolDecay*(i===destLoc?0.5:1);
+    if(i===destLoc&&out.fedHeat>=35) v+=out.fedHeat>=60?0.5:0.25;
+    v+=turf[i]*0.18;
+    return Math.round(CL(Math.max(base,v),0,MKT.patrolMax)*100)/100;
+  });
+  const informants=(s.informants||initInformants()).map((v,i)=>
+    Math.round(CL(i===destLoc?v:v-MKT.infDecay,0,MKT.infMax)*100)/100);
+  const infHere=informants[destLoc]||0;
+  if(infHere>=2.4&&(npcState.ramirez.evidence||0)<12&&Math.random()<0.10+infHere*0.04){
+    npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+1,0,20);
+    evtMsg="🐀 Somebody around here has your plate number written down. The file grew a page.";
+    wire=pushWire(wire,{icon:"🐀",tone:"bad",move:nm,text:`An informant in ${LOCS[destLoc].name} called Vice. +1 evidence.`});
+  }
+
+  // 3 ── supply shocks: telegraphed, then live, then over
+  const shocks=[];
+  for(const sk of (s.shocks||[])){
+    if(sk.pending){
+      shocks.push({...sk,pending:false});
+      wire=pushWire(wire,{icon:sk.icon,tone:sk.kind==="spike"?"good":"bad",move:nm,text:sk.landed});
+      continue;
+    }
+    const left=(sk.moves||1)-1;
+    if(left>0) shocks.push({...sk,moves:left});
+    else wire=pushWire(wire,{icon:"⌛",tone:"info",move:nm,
+      text:`${DRUGS[sk.drug].name} ${sk.loc>=0?"in "+LOCS[sk.loc].name:"citywide"} is back to normal.`});
+  }
+  if(shocks.length<MKT.shockCap&&Math.random()<MKT.shockChance){
+    const sk=rollShock();
+    shocks.push(sk);
+    wire=pushWire(wire,{icon:"📻",tone:"info",move:nm,text:sk.warn});
+    effects.push({type:"SFX",name:"pager"});
+  }
+
+  // 4 ── street rivals spoil the buyers wherever they are standing
+  const focus=[...(s.rivalFocus||[])];
+  (out.rivals||[]).forEach((rv,i)=>{
+    if(focus[i]==null||Math.random()<0.25) focus[i]=R(0,DRUG_COUNT-1);
+    const L=rv.loc, D=focus[i];
+    if(L>=0&&L<LOC_COUNT) locDemand[L][D]=CL(locDemand[L][D]*0.95,MKT.demFloor,MKT.demCeil);
+    if(L===destLoc&&Math.random()<0.16)
+      wire=pushWire(wire,{icon:"⚔",tone:"bad",move:nm,
+        text:`${rv.name} is moving ${DRUGS[D].name} in ${LOCS[L].name}. Buyers here have options.`});
+  });
+
+  // 5 ── the rival kingpin wakes up once you are worth his attention
+  const rival={...(s.rival||initRival())};
+  if(storyFlags.col_broken) rival.broken=true;
+  const grudge=Math.max(0,-(npcState.colombiano.trust||0))+(storyFlags.col_war?2:0);
+
+  // 6 ── the crew: paid on time they hold, unpaid they take other offers
+  const enfLoyalty=[...(s.enfLoyalty||LOCS.map(()=>100))];
+  if(enforcers.some(e=>e>0)){
+    if(cash<0){
+      cash=0;
+      for(let i=0;i<enfLoyalty.length;i++) if(enforcers[i]>0) enfLoyalty[i]=CL(enfLoyalty[i]-20,0,100);
+      evtMsg=evtMsg||"👊 Payday came and went. Your crew noticed. They always notice.";
+      wire=pushWire(wire,{icon:"👊",tone:"bad",move:nm,text:"The crew went unpaid. Loyalty is bleeding out."});
+      effects.push({type:"SHAKE"},{type:"SPAWN",text:"👊 CREW UNPAID",color:C.pink,y:.5});
+    } else {
+      const gain=(cred>=40?2.5:1.5)-(era.copsMod>=1.6?1:0);
+      for(let i=0;i<enfLoyalty.length;i++) enfLoyalty[i]=CL(enfLoyalty[i]+(enforcers[i]>0?gain:3),0,100);
+    }
+    for(let i=0;i<enforcers.length;i++){
+      if(enforcers[i]>0&&enfLoyalty[i]<=28&&Math.random()<0.28){
+        enforcers[i]-=1; enfLoyalty[i]=CL(enfLoyalty[i]+34,0,100);
+        const flip=!rival.broken&&Math.random()<0.5;
+        if(flip) rival.power+=1.5;
+        evtMsg=evtMsg||(flip
+          ?`👊 One of your people in ${LOCS[i].name} is working a Colombian corner now. He did not say goodbye.`
+          :`👊 One of your people in ${LOCS[i].name} did not show up. His apartment is empty.`);
+        wire=pushWire(wire,{icon:"👊",tone:"bad",move:nm,
+          text:flip?`A soldier defected to El Colombiano in ${LOCS[i].name}.`:`A soldier walked off in ${LOCS[i].name}.`});
+        effects.push({type:"SHAKE"});
+      }
+    }
+  }
+
+  // 7 ── his moves
+  const awake=!rival.broken&&((out.currentEra||0)>=1||(out.totalProfit||0)>=20000);
+  if(awake){
+    rival.power=Math.min(60,Math.round((rival.power+0.28+(out.currentEra||0)*0.10
+      +colTurf.filter(Boolean).length*0.18)*10)/10);
+    rival.cash+=1000+colTurf.filter(Boolean).length*800;
+    if(rival.truce>0&&rival.truce<900) rival.truce--;
+    if(rival.flood&&nm>=rival.flood.until) rival.flood=null;
+    npcState.colombiano.met=true;
+    storyFlags.col_rival_active=true;
+
+    if(rival.truce<=0&&nm%2===0){
+      const mine=turf.map((t,i)=>t>0?i:-1).filter(i=>i>=0);
+      const open=LOCS.map((l,i)=>i).filter(i=>!turf[i]&&!colTurf[i]&&i!==destLoc);
+      const roll=Math.random(), warMode=grudge>=3&&!storyFlags.col_peace;
+      if(warMode&&mine.length&&roll<0.22&&nm-(rival.lastRaid||0)>=4){
+        const target=mine[R(0,mine.length-1)];
+        turfWar={ loc:target, rivalName:"El Colombiano", rivalPower:CL(Math.round(rival.power*0.5)+R(0,2),3,15) };
+        rival.raids=(rival.raids||0)+1; rival.lastRaid=nm;
+        rival.lastAction="raid"; rival.lastText=`Moving on your block in ${LOCS[target].name}.`;
+      } else if(roll<0.50){
+        const L=(mine.length&&Math.random()<0.6)?mine[R(0,mine.length-1)]:R(0,LOC_COUNT-1);
+        const D=R(0,DRUG_COUNT-1);
+        rival.flood={loc:L,drug:D,until:nm+3};
+        locDemand[L][D]=CL(locDemand[L][D]*0.88,MKT.demFloor,MKT.demCeil);
+        rival.lastAction="flood"; rival.lastText=`Dumping ${DRUGS[D].name} in ${LOCS[L].name}.`;
+        wire=pushWire(wire,{icon:"🇨🇴",tone:"bad",move:nm,
+          text:`He is flooding ${LOCS[L].name} with ${DRUGS[D].name}. Sells there are ruined for a few days.`});
+      } else if(roll<0.68&&open.length&&!storyFlags.col_peace){
+        const claim=open[R(0,open.length-1)];
+        colTurf[claim]=true; rival.power+=0.6;
+        rival.lastAction="expand"; rival.lastText=`Took ${LOCS[claim].name}.`;
+        wire=pushWire(wire,{icon:"🇨🇴",tone:"bad",move:nm,
+          text:`New paint on the corners in ${LOCS[claim].name}. His crews work it now.`});
+      } else if(roll<0.76&&(npcState.ramirez.evidence||0)<10){
+        npcState.ramirez.evidence=CL((npcState.ramirez.evidence||0)+1,0,20);
+        rival.heat=Math.max(0,rival.heat-2);
+        rival.lastAction="tip"; rival.lastText="Fed Vice a name. Yours.";
+        wire=pushWire(wire,{icon:"📞",tone:"bad",move:nm,
+          text:"An anonymous call to Vice today. Anonymous, accurate, and Colombian."});
+      } else {
+        rival.power+=0.7; rival.cash+=4500;
+        rival.lastAction="build"; rival.lastText="Quiet week. Counting money.";
+      }
+    }
+
+    // the contract, telegraphed two moves out
+    if(grudge>=5&&!rival.hitFuse&&rival.truce<=0&&Math.random()<0.20){
+      rival.hitFuse=nm+2;
+      evtMsg=evtMsg||"🚗 A cream-colored Chevy has been parked across from your place since Tuesday. Nobody gets out of it.";
+      wire=pushWire(wire,{icon:"🚗",tone:"bad",move:nm,text:"You are being watched. Two moves, maybe less."});
+      effects.push({type:"SFX",name:"police"});
+    }
+    if(rival.hitFuse&&nm>=rival.hitFuse){
+      rival.hitFuse=0;
+      const guard=(out.gun?3:0)+(enforcers[destLoc]||0)*2+(((out.safeHouses||[])[destLoc]>=0)?2:0);
+      if(guard>=5){
+        cred=CL(cred+4,0,100);
+        npcState.colombiano.trust=CL((npcState.colombiano.trust||0)-1,-10,10);
+        evtMsg="🔫 They came for you in a parking lot. Your people were already there. Somebody else went to the hospital tonight.";
+        effects.push({type:"SHAKE"},{type:"SFX",name:"sellBig"},{type:"SPAWN",text:"🔫 THEY MISSED — +4 CRED",color:C.gold,y:.42});
+        wire=pushWire(wire,{icon:"🔫",tone:"good",move:nm,text:"Somebody tried. Somebody failed. The street noticed both."});
+      } else {
+        const loss=R(10,22), take=Math.min(Math.max(0,cash),R(1500,6000));
+        hp=CL(hp-loss,0,100); cash-=take;
+        evtMsg=`🔫 Two men, one car, eleven seconds. −${loss} HP${take>0?", −"+FM(take):""}. You never saw faces.`;
+        effects.push({type:"SHAKE"},{type:"FLASH",color:C.pink+"66"},{type:"SFX",name:"police"},{type:"PING",stat:"hp"});
+        wire=pushWire(wire,{icon:"🔫",tone:"bad",move:nm,text:"Shots on your block. Yours, specifically."});
+      }
+    }
+
+    // escalating confrontations — power 13 / 22 / 34
+    const level=rival.power>=34?3:rival.power>=22?2:rival.power>=13?1:0;
+    const busy=turfWar||(ctx&&(ctx.turfWar||ctx.dealEvent||ctx.randEnc));
+    if(level>(rival.confront||0)&&!busy){
+      rival.confront=level;
+      worldEvent=buildRivalEvent(level,{...out,cash,bank,cred},rival);
+      effects.push({type:"SFX",name:"pager"});
+    }
+  }
+
+  // 8 ── Treasury: dirty money is the only money they can take
+  let forfeitFuse=s.forfeitFuse||0;
+  if(!forfeitFuse&&out.fedHeat>=58&&(cash+bank)>=50000&&Math.random()<0.18){
+    forfeitFuse=nm+3;
+    evtMsg=evtMsg||"🏛 A Treasury agent spent the afternoon with your bank's records. Dirty money is the only kind they can take.";
+    wire=pushWire(wire,{icon:"🏛",tone:"bad",move:nm,
+      text:"Treasury subpoenaed account records. Wash it, spend it, or lose it — three moves."});
+    effects.push({type:"SFX",name:"pager"});
+  } else if(forfeitFuse&&nm>=forfeitFuse){
+    forfeitFuse=0;
+    if(out.fedHeat>=45){
+      const sb=Math.floor(bank*0.25), sc=Math.floor(Math.max(0,cash)*0.10);
+      bank-=sb; cash-=sc;
+      evtMsg=`🏛 ASSET FORFEITURE. ${FM(sb+sc)} seized. The clean money in your pocket is untouched — that was always the point of it.`;
+      effects.push({type:"SHAKE"},{type:"FLASH",color:C.blue+"55"},{type:"SFX",name:"police"},
+        {type:"SPAWN",text:`−${FM(sb+sc)} SEIZED`,color:C.pink,y:.48});
+      wire=pushWire(wire,{icon:"🏛",tone:"bad",move:nm,text:`Forfeiture order executed: ${FM(sb+sc)} gone.`});
+    } else {
+      evtMsg=evtMsg||"🏛 The audit closed. Nothing on paper, nothing to take. Cold money is invisible money.";
+      wire=pushWire(wire,{icon:"🏛",tone:"good",move:nm,text:"Treasury closed the file. You were boring enough."});
+    }
+  }
+
+  patch.locDemand=locDemand; patch.districtSales=districtSales;
+  patch.patrols=patrols; patch.informants=informants;
+  patch.shocks=shocks; patch.newsWire=wire; patch.rivalFocus=focus;
+  patch.rival=rival; patch.enfLoyalty=enfLoyalty; patch.enforcers=enforcers;
+  patch.colTurf=colTurf; patch.turf=turf; patch.npcState=npcState; patch.storyFlags=storyFlags;
+  patch.cash=Math.max(0,cash); patch.bank=Math.max(0,bank); patch.hp=hp; patch.cred=cred;
+  patch.forfeitFuse=forfeitFuse;
+  if(hp<=0) effects.push({type:"GAME_OVER",ending:"dead"});
+  if(hp<out.hp) patch.hudSeen={...out.hudSeen,hp:true};
+  return { patch, effects, evtMsg, turfWar, worldEvent };
+}
+
 // Sky colors for the living header — heat bleeds the sky red
 const skyStops=(move,heat)=>{
   const night=move%2===1, h=CL(heat/100,0,1);
@@ -436,6 +1067,100 @@ const STORY = {
     ] },
 
   // ── TIBURÓN — THE LOAN SHARK ──
+  // ── ARC: THE SUCCESSION — Tiburón, his nephew, and who owns a name (4 beats + epilogues) ──
+  shark_diagnosis: { speaker:"tiburon", portrait:"neutral", priority:10,
+    conditions:{ "npc.tiburon.met":{eq:true}, totalProfitGte:55000, flagNot:"shark_succession", dealsSinceGte:3 },
+    lines:[
+      { text:"Tiburón is not gutting anything. That is the first wrong thing. He is sitting on an overturned crate with a towel pressed to his mouth, and the ice table behind him is still holding yesterday’s fish.", portrait:"neutral" },
+      { text:"“Jackson Memorial,” he says, when he can. “They put a camera down my throat and showed me a photograph of the inside of me. Amigo, it is UGLY in there. Forty years of Marlboros and Presidente and telling people bad news.”", portrait:"neutral" },
+      { text:"He folds the towel so you cannot see the color of it. “My sister’s boy — Néstor. Twenty-six. He wears a beeper on his BELT like a doctor, and he has been counting my book at night when he believes I am asleep.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Your book is safe with me, viejo", reaction:"“VIEJO.” The laugh turns into something else and he waves it away. “You say that word like a man who intends to keep saying it. Okay. Okay. Remember that you said it — my memory is going, amigo, but my BOOK never does.”", effects:{ "npc.tiburon.trust":2, flags:["shark_succession"], montage:"Tiburon coughed into a towel and told you about his nephew." } },
+      { text:"Sounds like Néstor already runs it", reaction:"The old man goes still in a way that has ended arguments across four decades. “He runs the PARTS. There is a difference between running the parts and being the animal.” He spits into the ice. “But yes. He does. You have a nasty eye, amigo. I like it. Not today.”", effects:{ cred:2, "npc.tiburon.trust":-1, flags:["shark_succession","shark_saw_it"], montage:"Told Tiburon his nephew was already running the book." } },
+    ] },
+
+  shark_nestor: { speaker:"tiburon", portrait:"neutral", priority:11,
+    conditions:{ flag:"shark_succession", flagNot:"shark_nestor_done", dealsSinceGte:4 },
+    lines:[
+      { text:"The fish market has new scales — electronic, digital, Japanese. Tiburón stands beside one like it insulted his mother. “Néstor bought these. They are accurate to the GRAM. Tell me: in forty years, has any man ever wanted an accurate number from me?”", portrait:"neutral" },
+      { text:"“He went to the men in Hialeah who lend me what I lend you. He told them I am sick, which is true, and that I am soft, which is a matter of opinion, and that the book should belong to a man with a future.”", portrait:"neutral" },
+      { text:"“So now there is a vote, which is a beautiful word for what it is. And you, amigo — you are ON the book. Big number, good payer, the kind of client men brag about. Your voice is worth something in that room. He will come to you. He drives a red IROC. Subtle, no?”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"What do you want me to say in that room?", reaction:"“Say whatever keeps you breathing. I mean this.” He puts a hand on your shoulder; it weighs less than it used to. “But if you can say it in a way where I still own my own name at the end, I will remember that longer than I remember most things now.”", effects:{ "npc.tiburon.trust":1, flags:["shark_nestor_done"], montage:"Tiburon asked you to speak for him at the vote in Hialeah." } },
+      { text:"I stay out of family business", reaction:"“FAMILY BUSINESS.” He tests the phrase like a bad oyster. “Amigo, you owe money to a family. There is no outside. There is only how far from the table you are sitting when they decide.”", effects:{ flags:["shark_nestor_done","shark_neutral"], montage:"Told Tiburon you stay out of family business. He explained the seating." } },
+    ] },
+
+  shark_the_vote: { speaker:"tiburon", portrait:"neutral", priority:12,
+    conditions:{ flag:"shark_nestor_done", flagNot:"shark_resolved", dealsSinceGte:3 },
+    lines:[
+      { text:"A social club in Hialeah with the windows painted over and a dominoes table nobody is using. Six men who lend money and one man who borrows it — that is you. Tiburón sits at the end with the towel in his apron pocket. Néstor stands, because standing is his entire argument.", portrait:"neutral" },
+      { text:"“The book earns eleven percent,” Néstor says, holding a ledger like a hymnal. “It should earn nineteen. My uncle grants extensions for FUNERALS. Last year he forgave four thousand dollars because a man’s roof came off in a storm.” Nobody at the table disagrees with the arithmetic.", portrait:"neutral" },
+      { text:"Then all of them look at you, because in a room full of lenders the only honest witness is the debt. “Speak,” says the oldest man there, not unkindly. “You are the merchandise. The merchandise gets one word.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Néstor's numbers are better. Back the nephew.", reaction:"You say nineteen percent out loud and the room relaxes, the way rooms do when they hear what they already decided. Néstor wipes your book clean on the spot — a coronation gift, paid with somebody else’s mercy. Tiburón walks out into the parking lot alone and stands there a while, in the sun, in his apron.", effects:{ debtDelta:-1000000, cred:3, "npc.tiburon.trust":-4, flags:["shark_resolved","shark_heir"], montage:"Backed Nestor. The book got wiped. The old man walked out alone." } },
+      { text:"The old man's word is the only collateral here — $12,000 says so", reaction:"You put twelve thousand dollars on the dominoes table and explain what an extension for a funeral is actually worth in a business where every single person eventually needs one. It is the most expensive sentence of your life. The oldest man nods once. Néstor leaves before the vote finishes, and the IROC does not start on the first try.", effects:{ cashDelta:-12000, cred:5, "npc.tiburon.trust":4, flags:["shark_resolved","shark_loyal_final"], montage:"Paid $12,000 to keep Tiburon's name on Tiburon's book." } },
+      { text:"I abstain. It's your family.", reaction:"“The merchandise abstains,” the oldest man says, amused, and writes something down. The vote goes to Néstor by one. On the way out Tiburón does not look at you, which is worse than if he had, and your interest rate goes up on Friday without anybody making a phone call.", effects:{ debtDelta:3000, "npc.tiburon.trust":-2, flags:["shark_resolved","shark_abstained"], montage:"Abstained in Hialeah. Your rate went up on Friday." } },
+    ] },
+
+  shark_epilogue_heir: { speaker:"tiburon", portrait:"neutral", priority:9,
+    conditions:{ flag:"shark_heir", flagNot:"shark_epilogue", dealsSinceGte:4 },
+    lines:[
+      { text:"You find the old man on a shrimp boat at the end of a dock in Islamorada, with a radio playing a game nobody in Florida cares about. The apron is gone. He looks smaller, and somehow also better.", portrait:"neutral" },
+      { text:"“Néstor sends me an envelope every month. It is exactly correct. Nineteen percent of nothing I care about.” He baits a hook badly, on purpose, because there is no hurry anymore. “You voted with the arithmetic, amigo. Arithmetic is a good friend to have and a terrible thing to be.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"You'd have done the same", reaction:"“I would have,” he agrees instantly, which somehow makes it worse. “That is how I know exactly what you are.” He hands you a beer that is too warm. You drink it. The boat rocks. Neither of you says anything for twenty minutes, and it is almost forgiveness.", effects:{ "npc.tiburon.trust":1, flags:["shark_epilogue"], montage:"Warm beer on a shrimp boat in Islamorada. Almost forgiveness." } },
+      { text:"I'm sorry, viejo", reaction:"He waves the hook at you like a conductor. “Don’t be sorry. Sorry is what men say instead of money.” Then, after a while, quieter: “But if you ever need to be somewhere that is not Miami, this boat still runs. That is not sorry. That is the other thing.”", effects:{ "npc.tiburon.trust":2, flags:["shark_epilogue","shark_boat"], montage:"The shrimp boat still runs. Tiburon said so, and he does not lie about boats." } },
+    ] },
+
+  shark_epilogue_loyal: { speaker:"tiburon", portrait:"neutral", priority:9,
+    conditions:{ flag:"shark_loyal_final", flagNot:"shark_epilogue", dealsSinceGte:4 },
+    lines:[
+      { text:"The fish market at 6 AM, and the ice table is full again. Tiburón is gutting a snapper one-handed and losing an argument about the price of stone crab. He looks like a photograph of himself from 1978.", portrait:"neutral" },
+      { text:"“Néstor is in Tampa. He has a car wash. It is a very good car wash — I sent him the money for it, because he is my sister’s boy, and because a man with a car wash does not need a book.” The gold tooth flashes. “Also the doctors lied to me. Six months, they said. That was seven months ago. I intend to make this joke for YEARS.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Then let's keep making money, viejo", reaction:"“AMIGO.” He hits the table hard enough to make the ice jump. “That is the correct thing to say to a dying man who is not dying yet.” Your rate drops two points that morning, and the name of a boat that runs south out of Islamorada gets written on a napkin in fish-scale handwriting.", effects:{ debtDelta:-4000, "npc.tiburon.trust":2, flags:["shark_epilogue","shark_boat"], montage:"Tiburon wrote a boat's name on a napkin. It runs south." } },
+      { text:"Take the money and rest", reaction:"“REST.” He says it the way other men say a slur. But he takes a snapper off the ice, wraps it in newspaper, and pushes it into your hands. “For the pot. Rest is for men who did not enjoy the work. Come Thursday — Thursday I will need a man with a car.”", effects:{ "npc.tiburon.trust":1, flags:["shark_epilogue","shark_boat"], montage:"Told the shark to rest. He handed you a snapper instead." } },
+    ] },
+
+  shark_collectors: { speaker:"tiburon", portrait:"neutral", priority:11,
+    conditions:{ "npc.tiburon.met":{eq:true}, debtGte:22000, flagNot:"shark_collector", dealsSinceGte:2 },
+    lines:[
+      { text:"Two men are waiting in the stairwell, and one of them apologizes before he starts, which is the most frightening part of the entire evening. Tiburón watches from the car with the window down, drinking a mamey shake through a straw.", portrait:"neutral" },
+      { text:"“This is not personal, and I want you to hear that from ME so you do not hear it from a stranger,” he calls up. “Twenty-two thousand dollars is not a debt anymore, amigo. It is an OPINION about me. And opinions travel.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Take the beating. Keep the cash.", reaction:"They are professionals, so it is short and nothing important breaks. Afterward Tiburón passes you the mamey shake through the car window and says, with real warmth, “See? Now nobody has to TALK about you.” The book is unchanged. Your ribs are not.", effects:{ hpDelta:-22, cred:3, "npc.tiburon.trust":1, flags:["shark_collector"], montage:"Took the beating instead of the write-down. Kept the cash." } },
+      { text:"Pay $6,000 right now", reaction:"The envelope ends the evening the way a coin stops a jukebox. “THERE it is,” Tiburón says, delighted, and the two men relax back into being guys — one of them asks if you know a good body shop in Hialeah. “See how quickly we return to friendship?”", effects:{ cashDelta:-6000, debtDelta:-7000, "npc.tiburon.trust":1, flags:["shark_collector"], montage:"Paid $6,000 in a stairwell. The evening ended early." } },
+    ] },
+
+  shark_pistol: { speaker:"tiburon", portrait:"neutral", priority:8,
+    conditions:{ "npc.tiburon.met":{eq:true}, hasGun:false, credGte:18, cashGte:3000, flagNot:"shark_pistol", dealsSinceGte:3 },
+    lines:[
+      { text:"There is a cigar box under the ice table, which is a bad place to keep anything you plan to eat. Inside, wrapped in a dish towel: a .38 with the bluing worn off the grip and somebody else’s initials scratched out of the frame.", portrait:"neutral" },
+      { text:"“Twenty-five hundred. I am not selling you courage, amigo — courage is free and stupid. I am selling you a REASON for men to be polite. In this city that is a utility, like water. You pay for it monthly whether you use it or not.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"I'll take it — $2,500", reaction:"He wraps it back in the towel and hands it over like a fish. “Rule one: never show it. Rule two: if you show it, you are already using it. Rule three, which everybody forgets — a gun in Miami is a magnet for the exact evening you bought it to avoid.”", effects:{ cashDelta:-2500, gun:true, cred:2, flags:["shark_pistol"], montage:"Bought a .38 out of a cigar box under the ice table." } },
+      { text:"I'd rather not carry", reaction:"“Good.” He puts the box away without ceremony. “The ones who say yes too fast are the ones I read about in the Herald. The ones who say no become the ones I do business with for twenty years.” He says this to a man he has known for four months.", effects:{ "npc.tiburon.trust":1, flags:["shark_pistol","refused_gun"], montage:"Turned down the .38. The shark approved, loudly." } },
+    ] },
+
+  shark_keys_water: { speaker:"tiburon", portrait:"neutral", priority:6,
+    conditions:{ "npc.tiburon.met":{eq:true}, locIn:[5], totalProfitGte:40000, flagNot:"keys_run", dealsSinceGte:4 },
+    lines:[
+      { text:"Tiburón is on a dock in Islamorada in a shirt with parrots on it, supervising four men loading ice onto a boat that is considerably faster than a boat carrying ice needs to be.", portrait:"neutral" },
+      { text:"“Understand the geography, amigo. Between Key Largo and Marathon there are eleven hundred islands and about forty police officers, and all forty of them know each other’s boats by sight. This is not lawlessness. It is a very stable arrangement that everybody respects and nobody writes down.”", portrait:"neutral" },
+      { text:"“The mistake tourists make is the mistake the DEA makes: they look for the smuggler. In the Keys there is no smuggler. There is a fishing guide who is also somebody’s cousin, and there is Thursday.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Teach me the water", reaction:"He teaches you three channels, two names to drop, and one hand signal that means turn around and do not ask. “Now you know as much as a bad guide and less than a good one. Do not be confident. Confidence is how the reef gets fed.”", effects:{ cred:3, "npc.tiburon.trust":1, flags:["keys_run","knows_the_water"], montage:"Learned three channels and one hand signal in Islamorada." } },
+      { text:"I'll stick to the highway", reaction:"“US 1. One road, one lane in each direction, a hundred and thirteen miles of nowhere to turn around.” He shrugs, enormously. “It is a road designed by God for roadblocks. But you are a grown man and I am only a fishmonger.”", effects:{ flags:["keys_run"], montage:"Stuck to US 1. A road designed by God for roadblocks." } },
+    ] },
+
   tiburon_intro: { speaker:"tiburon", portrait:"neutral", priority:11,
     conditions:{ debtGte:6000, totalDealsGte:2, flagNot:"shark_intro" },
     lines:[
@@ -459,6 +1184,88 @@ const STORY = {
     ] },
 
   // ── MARIA ──
+  // ── ARC: CÉSAR — the brother you bought out of Panama comes home ──
+  cesar_returns: { speaker:"maria", portrait:"vulnerable", priority:13,
+    conditions:{ flag:"freed_cesar", totalProfitGte:60000, flagNot:"cesar_back", dealsSinceGte:4 },
+    lines:[
+      { text:"Maria calls at an hour she never calls, and her voice is doing something it has never done before: hurrying. “He’s at the gallery. He came off a plane from Panama City four hours ago with a duffel bag and a haircut somebody gave him with kitchen scissors.”", portrait:"vulnerable" },
+      { text:"César Santos is younger than you expected and thinner than the photograph, and he shakes your hand with the specific gratitude of a man who has been told exactly who paid for his freedom. He has also, you notice immediately, already located the bar cart.", portrait:"neutral" },
+      { text:"Maria watches him across the room. “He was better at this than all of us. That is not a compliment. Here is the honest sentence, cowboy: if you put him to work he will make you money for eleven weeks, and then he will make you a DEFENDANT.”", portrait:"knowing" },
+    ],
+    choices:[
+      { text:"Put him to work", reaction:"He is spectacular. He knows three suppliers you could never reach and one buyer you should not have. He also talks — in bars, to women, to men he assumes are those women’s cousins. Maria stops coming to the gallery on the days he is there.", effects:{ cashDelta:4000, cred:6, "npc.maria.trust":-1, "npc.ramirez.evidence":2, flags:["cesar_back","cesar_working"], montage:"Put Cesar Santos to work. He was spectacular. He was also loud." } },
+      { text:"Buy him a bus ticket somewhere boring — $3,000", reaction:"Gainesville. Three thousand dollars, an apartment deposit, and a promise you both know is a coin flip. Maria walks him to the station herself and comes back wearing sunglasses at nine o’clock at night. “Thank you,” she says, and then immediately, “we are not discussing this.”", effects:{ cashDelta:-3000, "npc.maria.trust":3, flags:["cesar_back","cesar_exiled"], montage:"Bought Cesar a bus ticket to Gainesville. Maria wore sunglasses at night." } },
+    ] },
+
+  cesar_eleven_weeks: { speaker:"maria", portrait:"angry", priority:12,
+    conditions:{ flag:"cesar_working", evidenceGte:9, flagNot:"cesar_arc_done", dealsSinceGte:4 },
+    lines:[
+      { text:"Eleven weeks, almost exactly. Maria puts a payphone number in front of you and does not sit down. “Metro-Dade picked him up on Washington Avenue with four grams and a mouth. He has been in an interview room for nine hours.”", portrait:"angry" },
+      { text:"“Nine hours is not nothing, to be fair to him. Most men are finished at ninety minutes.” She lights a cigarette she does not smoke and watches it burn down. “There is a lawyer named Broche. He costs nine thousand dollars and he gets people out before lunch.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Call Broche. Pay the nine.", reaction:"The lawyer arrives at 6 AM in a suit worth more than the charge, and César is on the street by ten having said, it turns out, absolutely nothing for nine hours. “He HELD,” Maria says, genuinely stunned. “I have never been so happy to be wrong about my own blood.”", effects:{ cashDelta:-9000, "npc.ramirez.evidence":-4, "npc.maria.trust":3, flags:["cesar_arc_done","cesar_held"], montage:"Paid Broche $9,000. Cesar held for nine hours and said nothing." } },
+      { text:"He got himself in there", reaction:"“Yes,” Maria agrees, and that is the entire conversation. By Thursday there is a new name in a file downtown and a detective who suddenly knows where you buy. César goes back to Panama, permanently. Maria answers the phone on the fourth ring now instead of the first.", effects:{ "npc.ramirez.evidence":4, "npc.maria.trust":-3, flags:["cesar_arc_done","cesar_burned"], montage:"Left Cesar in the room. He talked. Maria answers on the fourth ring now." } },
+    ] },
+
+  maria_empty_seat: { speaker:"maria", portrait:"knowing", priority:10,
+    conditions:{ flag:"sold_the_seat", totalProfitGte:70000, flagNot:"seat_regret", dealsSinceGte:4 },
+    lines:[
+      { text:"The gallery is between shows, which means it is a white room with a horse in it. Maria is doing inventory with a clipboard, which is the thing she does instead of feelings.", portrait:"neutral" },
+      { text:"“The plane went Tuesday, in case you were curious. It landed. The pilot mailed a postcard with nothing written on it, which is how he says everything is fine.” She does not look up. “Your seat went to a woman who owns four dry cleaners. She cried at wheels-up. It was embarrassing for everybody.”", portrait:"knowing" },
+      { text:"“There is a second charter in six weeks. Same pilot, worse plane, and the price is no longer friendly, because you taught me that our friendship has a RATE. Twenty-five thousand dollars.”", portrait:"amused" },
+    ],
+    choices:[
+      { text:"Buy the seat back — $25,000", reaction:"She writes it on the clipboard, which is somehow more binding than a contract. “Done. And cowboy — this one I do not resell. Not because I like you. Because I am tired of watching men be clever at exactly the wrong scale.”", effects:{ cashDelta:-25000, "npc.maria.trust":2, flags:["seat_regret","seat_rebought"], montage:"Bought back the seat you sold. Twenty-five thousand. No discount." } },
+      { text:"I made the right call", reaction:"“You made A call.” She turns a page on the clipboard. “In eleven years I have watched exactly one man leave Miami with money, and I have watched forty-two men be right about something. Those are the numbers. Do with them whatever you like.”", effects:{ cred:2, "npc.maria.trust":-1, flags:["seat_regret"], montage:"Told Maria you were right about the seat. She quoted you the numbers." } },
+    ] },
+
+  maria_prosecutor: { speaker:"maria", portrait:"knowing", priority:10,
+    conditions:{ flag:"high_society", credGte:28, flagNot:"prosecutor_met", dealsSinceGte:3 },
+    lines:[
+      { text:"Same mansion, different party, and the pool is still shaped like a dollar sign. Maria arrives at your elbow with two drinks and one piece of information. “Red dress, eleven o’clock. Diane Vance. Assistant United States Attorney, narcotics.”", portrait:"amused" },
+      { text:"“She has been at this party for forty minutes and she has not spoken to a single person who is not under indictment or adjacent to somebody who is. That is not a coincidence, cowboy. That is a WORK EVENT.”", portrait:"knowing" },
+      { text:"Vance crosses the room like the hostess invited her, which the hostess did, because in Coral Gables everybody collects everybody. “I know three things about you,” she says, in place of hello, “and two of them are boring.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Take her card", reaction:"The card is thick and the number handwritten on the back is a direct line, which means it is not a courtesy, it is a fishing line. “Call before it’s the only good idea left,” she says. “Everybody calls me eventually. The successful ones call early.” Maria watches this happen with an expression like weather.", effects:{ flags:["prosecutor_met","prosecutor_card"], montage:"Took a federal prosecutor's card. Direct line, handwritten." } },
+      { text:"Compliment the dress. Walk away.", reaction:"You tell her the dress is excellent and that you hope the government reimburses her for parking, and you leave her standing in a room full of criminals holding a plastic cup of chardonnay. She laughs. Twice. That is also on the record now.", effects:{ cred:4, "npc.ramirez.evidence":1, flags:["prosecutor_met"], montage:"Walked away from a federal prosecutor at a pool party. She laughed twice." } },
+    ] },
+
+  maria_overtown: { speaker:"maria", portrait:"vulnerable", priority:8,
+    conditions:{ flag:"maria_hates_crack", soldCrack:true, flagNot:"crack_amends", dealsSinceGte:5 },
+    lines:[
+      { text:"Maria drives you to Overtown at two in the afternoon, which is a thing she has never done, and parks across the street from an elementary school. She does not say anything for four minutes.", portrait:"neutral" },
+      { text:"“The woman on the steps in the blue shirt is Yolanda. Two years ago she kept the books for a shipping company on the river. She is thirty-four years old. Look at her hands, then look at me and tell me it is just business again — I am prepared to hear it. I only want you to say it HERE.”", portrait:"vulnerable" },
+    ],
+    choices:[
+      { text:"I'm done selling crack", reaction:"“Okay.” She starts the car. She does not thank you, does not soften, does not make it a moment — which is exactly how you know she believes you. Six blocks later: “There is more money in Coral Gables anyway. Rich people ruin themselves quietly and pay a premium for the privilege.”", effects:{ cred:-2, "npc.maria.trust":3, flags:["crack_amends","no_more_crack"], montage:"Sat outside a school in Overtown with Maria. Stopped selling crack." } },
+      { text:"It's just business, Maria", reaction:"She nods slowly, puts the car in gear, and drives you back without another word. At your corner she says, “Thank you for saying it here,” and means it, and you understand that you have just failed a test that was never going to be offered twice.", effects:{ cred:2, "npc.maria.trust":-3, flags:["crack_amends","said_it_in_overtown"], montage:"Said it was just business. In Overtown. Across from the school." } },
+    ] },
+
+  maria_causeway: { speaker:"maria", portrait:"flirty", priority:6,
+    conditions:{ "npc.maria.met":{eq:true}, nightOnly:true, locIn:[0], credGte:15, flagNot:"causeway_night", dealsSinceGte:4 },
+    lines:[
+      { text:"Maria makes you pull over halfway across the MacArthur Causeway at three in the morning and shut the engine off. The water is flat and black and the skyline is doing the thing it does, which is pretend to be a promise.", portrait:"neutral" },
+      { text:"“Every person in every one of those windows believes this city is about to give them something,” she says, sitting on the hood. “The waiters, the models, the Colombians, the CONGRESSMEN. Same disease. Miami is the only place on earth where it counts as a personality.”", portrait:"flirty" },
+      { text:"“I make you stop here because I want you to see it from the outside, once. From out here it is only lights. In there it is a machine, and the machine eats the people who forget the difference.”", portrait:"knowing" },
+    ],
+    choices:[
+      { text:"It's beautiful from here", reaction:"“It is. That is the trap — it is honestly beautiful, so you stay.” She gets back in the car and puts her sunglasses on top of her head at three in the morning. “Enough. One more sincere thought tonight and I will have to buy something to recover.”", effects:{ cred:1, "npc.maria.trust":1, flags:["causeway_night"], montage:"Stopped on the MacArthur at 3 AM. Saw it from the outside, once." } },
+      { text:"It's a market. That's all.", reaction:"“God, that’s bleak. Correct, but bleak.” She flicks a cigarette into Biscayne Bay, a felony for which nobody in the history of Florida has ever been charged. “Fine. Drive. The market opens in four hours and neither of us is a poet.”", effects:{ cred:2, flags:["causeway_night"], montage:"Called Miami a market from the middle of the causeway." } },
+    ] },
+
+  maria_wide_part: { speaker:"maria", portrait:"knowing", priority:10,
+    conditions:{ "npc.maria.met":{eq:true}, moveGte:55, totalProfitGte:80000, flagNot:"clock_late", dealsSinceGte:3 },
+    lines:[
+      { text:"Maria stopped asking when you are leaving, and you noticed about two weeks after she stopped. Tonight she says it plainly, in the dark gallery with the streetlight doing all the work: “You are not going to go.”", portrait:"knowing" },
+      { text:"“I have watched this exact month before. The money is good, the routes are quiet, everyone knows your name, and it feels like the beginning of something. It is not the beginning. It is the WIDE PART. Everything after this narrows.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"One more season", reaction:"“One more season.” She repeats it the way a doctor repeats a symptom back to a patient. “Write it down somewhere, so that when it happens you at least get to be right about it. That is worth something. Not very much. Something.”", effects:{ cred:3, flags:["clock_late","one_more_season"], montage:"Told Maria one more season. She repeated it like a symptom." } },
+      { text:"Then help me pick the day", reaction:"For the first time in months she looks genuinely surprised. Then she takes a pen and a gallery invoice and writes down four dates, a dollar figure, and one name. “That is the day. That is the number. That is the man. Do not improvise, cowboy — improvising is how everyone I have ever liked has died.”", effects:{ "npc.maria.trust":2, flags:["clock_late","picked_the_day"], montage:"Maria wrote four dates, a number and a name on a gallery invoice." } },
+    ] },
+
   maria_tip: { speaker:"maria", portrait:"amused", priority:9,
     conditions:{ totalProfitGte:5000, "npc.maria.trust":{gte:1}, flagNot:"maria_gave_tip", dealsSinceGte:2 },
     lines:[
@@ -514,6 +1321,103 @@ const STORY = {
     choices:[{ text:"It’s just business, Maria", reaction:"“My mother said the same thing about the hotel. ‘It’s just work, Maria.’ It’s never just anything.” She leaves her drink untouched. That’s how you know it’s serious.", effects:{ "npc.maria.trust":-2, flags:["maria_hates_crack"] } }] },
 
   // ── RAMIREZ ──
+  // ── ARC: ELENA — the detective's daughter (5 beats, branch pays off in the ending) ──
+  elena_contact_sheet: { speaker:"ramirez", portrait:"tired", priority:11,
+    conditions:{ "npc.ramirez.met":{eq:true}, evidenceGte:5, flagNot:"elena_met", dealsSinceGte:3 },
+    lines:[
+      { text:"Ramirez is sitting on the hood of the brown sedan with a manila envelope on his knee, eating a Cuban sandwich with the concentration of a man who missed lunch on Tuesday and is aware that it is now Thursday.", portrait:"neutral" },
+      { text:"“My kid takes pictures. Eighteen. Night classes at Miami-Dade, thinks this city is a SUBJECT instead of a place.” He slides a contact sheet across the hood. Thirty-six tiny frames of Overtown at dusk. “Frame nineteen.”", portrait:"tired" },
+      { text:"Frame nineteen is you. Half-turned, hand out, taking money on a corner that has never once been photographed for its architecture. “She doesn’t know what she got. She thinks it’s a picture about the light.”", portrait:"wry" },
+    ],
+    choices:[
+      { text:"She won't see me on that corner again", reaction:"“That’s the correct answer. It’s also the answer everybody gives me.” He folds the sheet back into the envelope like a man putting a bird back in a cage. “Elena. Her name is Elena. Now you know it, which means now it costs you something.”", effects:{ "npc.ramirez.trust":1, flags:["elena_met","elena_promise"], montage:"Ramirez showed you frame nineteen. Her name is Elena." } },
+      { text:"Keep your family out of my business", reaction:"“She walked into YOUR business, kid. With a camera her grandmother paid for.” He gets off the hood, brushing crumbs off a tie that stopped being fashionable during the Carter administration. “Fifteen years I’ve done this without hating anybody. Don’t be the one who ruins the record.”", effects:{ "npc.ramirez.evidence":1, "npc.ramirez.trust":-1, flags:["elena_met"], montage:"Told Ramirez to keep his family out of it. He remembered that." } },
+    ] },
+
+  elena_exhibition: { speaker:"maria", portrait:"knowing", priority:11,
+    conditions:{ flag:"elena_met", "npc.maria.met":{eq:true}, evidenceGte:7, flagNot:"elena_project", dealsSinceGte:4 },
+    lines:[
+      { text:"Maria has a habit of knowing your business before you have finished having it. Tonight she is holding a gallery mailer and wearing an expression you have learned to be afraid of.", portrait:"knowing" },
+      { text:"“Juried student show at the Center for Fine Arts. Thirty prints. It’s called THE ECONOMY OF LIGHT.” She taps a name on the mailer: E. RAMIREZ. “The girl is good, by the way. Genuinely good. That’s the inconvenient part.”", portrait:"amused" },
+      { text:"“Frame nineteen goes on a wall four blocks from the State Attorney’s office, blown up to a meter wide. A prosecutor will stand in front of it holding a plastic cup of chardonnay and he WILL recognize you, cowboy, because that is what prosecutors do at parties.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Buy the whole series, anonymously — $6,000", reaction:"Maria buys it through the gallery as an unnamed collector, which is the most Miami sentence ever constructed. The girl gets six thousand dollars and believes she has arrived. In a way she has. “She’ll shoot boats next,” Maria predicts. “Rich people adore boats.”", effects:{ cashDelta:-6000, "npc.maria.trust":1, "npc.ramirez.trust":1, flags:["elena_project","elena_bought"], montage:"Bought Elena Ramirez's entire show. Anonymously. $6,000." } },
+      { text:"Let it hang. Let them look.", reaction:"“Bold.” She refolds the mailer with surgical care. “You understand that this is how legends start AND how sentences do.” The show opens Thursday. Nine hundred people come through in three weeks. Two of them work for the government.", effects:{ cred:6, heatDelta:6, "npc.ramirez.evidence":3, flags:["elena_project","elena_published"], montage:"Let your face hang in a museum. Nine hundred people came." } },
+    ] },
+
+  elena_the_ask: { speaker:"ramirez", portrait:"tired", priority:12,
+    conditions:{ flag:"elena_project", evidenceGte:11, flagNot:"elena_asked", dealsSinceGte:3 },
+    lines:[
+      { text:"Four in the morning at a Denny’s on Biscayne. Ramirez has the corner booth and the look of a man who has been rehearsing in the car. There is no file on the table. That is how you know this is not police work.", portrait:"tired" },
+      { text:"“She’s going back to Overtown. Nights, now. She says the light is better and the people are honest, and she is RIGHT, which is the entire problem.” He turns his coffee cup a quarter turn. “I’ve told her. Her mother’s told her. She has my stubbornness and her mother’s nerve. God help the both of us.”", portrait:"tired" },
+      { text:"“So I am going to ask a criminal for a favor, and then I am going to go sit in my car for a while. Scare her off those corners. Not touch her — SCARE her. Be the thing she currently thinks is just an interesting shadow.”", portrait:"wry" },
+    ],
+    choices:[
+      { text:"I'll be the monster. Once.", reaction:"You wait under a dead streetlight and say four sentences you will remember for the rest of your life. She runs. She drops a lens cap and does not come back for it. Three days later a paper bag appears on your car: the lens cap, a page torn out of a file, and no note at all.", effects:{ cred:-4, "npc.ramirez.trust":2, "npc.ramirez.evidence":-4, flags:["elena_asked","elena_scared"], montage:"Scared Elena Ramirez off the corners. Four sentences. No note." } },
+      { text:"No. She's got your spine — respect it.", reaction:"He looks at you for a long moment and something in his face does an unfamiliar thing. “Yeah,” he says finally. “She does.” He pays for both coffees. “I’m still going to put you in prison. But I’m going to feel a way about it now, and I didn’t before.”", effects:{ "npc.ramirez.trust":2, "npc.ramirez.evidence":1, flags:["elena_asked","elena_respected"], montage:"Refused to scare Ramirez's daughter. He paid for the coffee." } },
+      { text:"Interesting. A detective with a pressure point.", reaction:"The temperature in the booth drops ten degrees. “I came here as a father,” he says, very quietly, “and you answered me as a dealer. Fine. Then that’s who I arrest.” He leaves cash on the table — exact, to the penny, including tax. You have just made an enemy of the only honest man in Dade County.", effects:{ cred:4, "npc.ramirez.trust":-4, "npc.ramirez.evidence":3, flags:["elena_asked","elena_used"], montage:"Threatened Ramirez with his own daughter. The booth got cold." } },
+    ] },
+
+  elena_the_debt: { speaker:"ramirez", portrait:"tired", priority:13,
+    conditions:{ flagAny:["elena_scared","elena_respected"], evidenceGte:14, flagNot:"elena_resolved", dealsSinceGte:2 },
+    lines:[
+      { text:"A shopping-center parking lot in Kendall, which is where men do the things they cannot do downtown. Ramirez has a cardboard box in the trunk and a lighter he borrowed from somebody, because he quit smoking in 1979 and has mentioned it every year since.", portrait:"neutral" },
+      { text:"“Two hundred and six pages in this box exist only because I wrote them down. Not evidence — INTELLIGENCE. The difference is a lawyer, but the difference is also me.” He lights the first page off the second. “She printed a photograph of me last month. I look old in it. I AM old in it.”", portrait:"tired" },
+      { text:"“This doesn’t make us friends and it doesn’t make you clean. It makes us two men who agreed about one thing, one time.” The box burns in a shopping cart behind a closed Zayre. A security guard looks at it for a while and decides it is not his problem.", portrait:"wry" },
+    ],
+    choices:[
+      { text:"Thank you, detective", reaction:"“Don’t.” He watches the last page curl. “Thank me by being GONE. Genuinely gone — not Fort Lauderdale gone. If I see you in this city in six months I will rebuild every page, and I will be faster the second time.”", effects:{ "npc.ramirez.evidence":-8, "npc.ramirez.trust":1, flags:["elena_resolved","ramirez_debt"], montage:"Ramirez burned 206 pages in a shopping cart behind a dead Zayre." } },
+      { text:"Rebuild it. I'll still be here.", reaction:"He laughs — an actual laugh, rusty from lack of use. “That is the most honest thing anybody has said to me all year.” He burns the pages anyway. “Consider it a head start. I have never given one before and I do not expect to enjoy the experience.”", effects:{ cred:5, "npc.ramirez.evidence":-6, flags:["elena_resolved","ramirez_debt"], montage:"Told Ramirez you'd stay. He gave you the head start anyway." } },
+    ] },
+
+  elena_vendetta: { speaker:"ramirez", portrait:"wry", priority:13,
+    conditions:{ flag:"elena_used", evidenceGte:13, flagNot:"elena_resolved", dealsSinceGte:2 },
+    lines:[
+      { text:"There is no meeting. There is a Tuesday when three people you trust stop returning calls, a Wednesday when your favorite payphone is suddenly out of order, and a Thursday when you understand that the brown sedan has not been behind you in eleven days because it no longer needs to be.", portrait:"neutral" },
+      { text:"He finally calls. No greeting. “I took two weeks of vacation,” Ramirez says. “First time since ’81. I spent all of it on you. Do you have any idea what a man can build in fourteen days when nobody is making him do paperwork?”", portrait:"wry" },
+      { text:"“My daughter asked why I was working on my vacation. I told her a man had threatened her with a smile. She said, ‘Dad, that’s awful.’ She’s eighteen. She still thinks awful is RARE.”", portrait:"tired" },
+    ],
+    choices:[
+      { text:"You've got nothing that sticks", reaction:"“I have your supplier’s cousin, your banker’s intern, and a wiretap on a payphone you are sentimental about.” A pause you could park a car in. “It doesn’t have to stick. It has to WEIGH.”", effects:{ heatDelta:12, "npc.ramirez.evidence":4, flags:["elena_resolved","ramirez_vendetta"], montage:"Ramirez spent his vacation on you. All fourteen days of it." } },
+      { text:"Name your price, detective", reaction:"The silence goes on long enough that you check the line. “Thirty-eight thousand a year,” he says at last. “That is the number you are fishing for. You should understand that I have known it every single day since 1971, and that it has never once been for sale.” Click.", effects:{ cred:-3, heatDelta:8, "npc.ramirez.evidence":3, flags:["elena_resolved","ramirez_vendetta"], montage:"Tried to buy Ramirez. He quoted you his salary and hung up." } },
+    ] },
+
+  ramirez_quiet_week: { speaker:"ramirez", portrait:"wry", priority:7,
+    conditions:{ "npc.ramirez.met":{eq:true}, fedHeatLte:10, totalProfitGte:60000, flagNot:"quiet_week", dealsSinceGte:4 },
+    lines:[
+      { text:"Ramirez is in line behind you at a Farm Store on Bird Road buying a lottery ticket and a banana, and he does not pretend to be surprised. “Relax. It’s my day off. I get those. There’s a rumor about them.”", portrait:"wry" },
+      { text:"“You’ve been quiet. Eleven days of quiet. You know what quiet does to a surveillance file? It makes it look like a MISTAKE. Two weeks of quiet and my captain reassigns me to a boat-theft ring in Hollywood.”", portrait:"tired" },
+      { text:"“So: congratulations. Sincerely. You are winning, in the specific way this thing is winnable — which is boringly, and for a while, and then not.” He buys the banana. He leaves the lottery ticket on the counter.", portrait:"wry" },
+    ],
+    choices:[
+      { text:"Take the day off, detective", reaction:"“I’m trying. My wife would tell you how that’s going.” He eats the banana in the parking lot next to a car that has not started on the first try since the Ford administration. “Stay quiet. Genuinely. It’s the only advice I hand out for free.”", effects:{ heatDelta:-4, "npc.ramirez.trust":1, flags:["quiet_week"], montage:"Ramirez said quiet was winning. Then he bought a banana." } },
+      { text:"Enjoy Hollywood", reaction:"“Boat theft,” he says wistfully. “Nobody dies in boat theft. My daughter would see me at dinner.” He looks at you a second too long. “And then some idiot would get loud in Overtown, and I would come back, and I would not be in a good mood about it.”", effects:{ cred:2, "npc.ramirez.evidence":1, flags:["quiet_week"], montage:"Wished Ramirez luck with the boat-theft ring in Hollywood." } },
+    ] },
+
+  ramirez_third_time: { speaker:"ramirez", portrait:"tired", priority:8,
+    conditions:{ "npc.ramirez.met":{eq:true}, bustsGte:2, flagNot:"two_busts", dealsSinceGte:3 },
+    lines:[
+      { text:"“Two arrests,” Ramirez says from the passenger seat of his own car, in a parking garage, with the door open and one foot on the ground like a man who has not decided whether he is staying. “Neither of them mine, which annoys me more than you can possibly imagine.”", portrait:"tired" },
+      { text:"“Here is a thing nobody tells you. The first arrest is an accident. The second is a pattern. The third is a SENTENCE. Judges in this county count to three out loud — it’s practically a ceremony, they enjoy it.”", portrait:"wry" },
+    ],
+    choices:[
+      { text:"There won't be a third", reaction:"“That is what the paperwork always says.” He shuts the door and rolls the window down, because the air conditioning has not worked in years. “For what it’s worth — and it is worth nothing — I hope you’re right. I have enough people in Coleman.”", effects:{ "npc.ramirez.trust":1, flags:["two_busts"], montage:"Ramirez explained how judges in Dade County count to three." } },
+      { text:"Third time's a charm, detective", reaction:"He laughs with no joy in it whatsoever. “You know what I like about this job? Nobody has ever surprised me. Not once in fifteen years.” The window goes up. Somewhere in Vice Intelligence a note is added to a file, and this one is not underlined, which is somehow worse.", effects:{ cred:2, "npc.ramirez.evidence":2, flags:["two_busts"], montage:"Told Ramirez third time's a charm. He stopped being surprised in 1971." } },
+    ] },
+
+  ramirez_proffer: { speaker:"ramirez", portrait:"neutral", priority:12,
+    conditions:{ flag:"prosecutor_card", evidenceGte:12, flagNot:"proffer_done", dealsSinceGte:3 },
+    lines:[
+      { text:"Room 411, federal building, a table with a scratch in it shaped almost exactly like Florida. AUSA Vance lays two documents side by side and does not sit down. Ramirez sits. Ramirez has brought his own thermos, because he does not trust the machine on four.", portrait:"neutral" },
+      { text:"“Proffer letter,” he says, tapping the left one. “You talk, and it can’t be used against you directly. Directly is doing a lot of work in that sentence, and she will tell you it isn’t.” Vance says, evenly, “It isn’t.” Ramirez drinks his coffee.", portrait:"tired" },
+      { text:"“Five years, of which you serve most of three, at a camp with a running track and a library. Versus what she asks for at trial, which is a number I do not say out loud in front of people who might faint in a federal building.”", portrait:"wry" },
+    ],
+    choices:[
+      { text:"Sign the proffer", reaction:"You talk for six hours. It is the least glamorous day of your criminal career and by far the most consequential. Your file stops being a case and becomes a COOPERATION, which is a different building entirely. Somewhere south, men who read the Herald carefully begin reading it about you.", effects:{ cred:-14, "npc.ramirez.evidence":-9, "npc.colombiano.trust":-3, flags:["proffer_done","proffer_signed","became_informant"], montage:"Signed the proffer in room 411. Six hours. Talked about everybody." } },
+      { text:"Not today, counselor", reaction:"Vance caps her pen with the finality of a woman who has just been handed a gift. “Good. Honestly. Half my convictions are men who signed that thing badly.” In the elevator Ramirez says, to nobody in particular, “That’s the one I’d have picked too,” and then does not speak to you for a month.", effects:{ cred:6, "npc.ramirez.evidence":2, flags:["proffer_done","refused_proffer"], montage:"Refused the proffer. Vance capped her pen and looked disappointed." } },
+    ] },
+
   ramirez_intro: { speaker:"ramirez", portrait:"neutral", priority:15,
     conditions:{ fedHeatGte:15, "npc.ramirez.met":{eq:false} },
     lines:[
@@ -560,6 +1464,99 @@ const STORY = {
     ] },
 
   // ── EL COLOMBIANO ──
+  // ── ARC: NINETY-SIX PERCENT — the cartel's chemist (3 beats, 3-way branch, two echoes) ──
+  col_chemist: { speaker:"colombiano", portrait:"pleased", priority:11,
+    conditions:{ flag:"cartel_supplier", totalProfitGte:70000, flagNot:"chemist_met", dealsSinceGte:3 },
+    lines:[
+      { text:"A warehouse in Doral that smells like ether and orange peel. El Colombiano walks you past forty drums of something entirely legal to one small table with a scale on it, where a thin man in reading glasses is doing something delicate with a beaker.", portrait:"neutral" },
+      { text:"“This is Aurelio. In Medellín he is a national resource. He is HERE because a man who is a national resource is also a national liability, and I prefer my resources where I can see them. Aurelio — tell the man your number.”", portrait:"pleased" },
+      { text:"Aurelio does not look up. “Ninety-four,” he says. “Ninety-six if the acetone is not from Hialeah.” El Colombiano beams like a father at a recital. “Ninety-six. Do you understand what that does to a market, friend? This city has been drinking WATER and calling it rum.”", portrait:"pleased" },
+    ],
+    choices:[
+      { text:"Put me on his output", reaction:"“That is the correct greed.” Your shipments start coming out of Doral, and for a while every corner in Miami tastes the difference and pays for it. Aurelio never looks up. Not once, not in nine weeks. You begin to notice that.", effects:{ "npc.colombiano.trust":2, demandBoost:{idx:5,mult:1.45}, flags:["chemist_met"], montage:"Got on Aurelio's output. Ninety-six percent, and the city noticed." } },
+      { text:"Why show me this?", reaction:"“Because a man who is shown a thing becomes responsible for it.” He says it pleasantly, adjusting a cuff. “That is not a threat, friend, it is a DEFINITION. In my business we do not have contracts. We have people who have been shown things.”", effects:{ "npc.colombiano.trust":1, flags:["chemist_met","chemist_wary"], montage:"El Colombiano showed you the chemist. That made you responsible." } },
+    ] },
+
+  chemist_defects: { speaker:"maria", portrait:"knowing", priority:12,
+    conditions:{ flag:"chemist_met", fedHeatGte:35, flagNot:"chemist_resolved", dealsSinceGte:4 },
+    lines:[
+      { text:"Maria calls you to the gallery at closing and locks the door behind you, which she has never done. A man is sitting on the bench in front of the sad horse painting, holding a briefcase on his knees like a passenger waiting for a bus.", portrait:"neutral" },
+      { text:"“He walked into MY gallery,” she says, in the voice of a woman itemizing damages. “Aurelio. The cook. He has a sister in Costa Rica, eleven thousand dollars, and a suitcase that is mostly notebooks, and he believes that is a plan.”", portrait:"knowing" },
+      { text:"“So now you have three doors, cowboy, and every one of them locks behind you. Get him out. Sell him to the detective. Or hand him back to the man in the cream suit and then sleep however it is that you sleep.”", portrait:"amused" },
+    ],
+    choices:[
+      { text:"Get him out. Costa Rica. — $12,000", reaction:"It costs twelve thousand, a night boat out of Tavernier, and a driver who does not ask questions. Aurelio shakes your hand with both of his and says a word in a language you do not speak. Maria watches the taillights. “Well,” she says. “That was expensive AND correct. Enjoy the novelty.”", effects:{ cashDelta:-12000, cred:4, "npc.maria.trust":2, "npc.colombiano.trust":-3, flags:["chemist_resolved","chemist_freed"], montage:"Put the cartel's chemist on a night boat out of Tavernier." } },
+      { text:"Sell him to Ramirez", reaction:"A detective meets a chemist in a federal building at 6 AM, and by noon a warehouse in Doral belongs to the government. Your file gets thinner. So does the list of people who will meet you alone. Maria does not call for nine days, and when she does it is about something else.", effects:{ cred:-8, "npc.ramirez.evidence":-6, "npc.maria.trust":-2, "npc.colombiano.trust":-4, flags:["chemist_resolved","chemist_sold","became_informant"], montage:"Sold Aurelio to Vice. The Doral warehouse belongs to the government now." } },
+      { text:"Call the cream suit", reaction:"El Colombiano thanks you personally, which is the part you will think about later. Ten thousand dollars arrives in a shoebox with a bottle of rum on top. Nobody sees Aurelio again. The product stays at ninety-six percent for exactly two more months, and then it doesn’t.", effects:{ cashDelta:10000, "npc.colombiano.trust":3, "npc.maria.trust":-2, flags:["chemist_resolved","chemist_delivered"], montage:"Handed the chemist back. A shoebox, a bottle of rum, no questions." } },
+    ] },
+
+  chemist_postcard: { speaker:"maria", portrait:"amused", priority:7,
+    conditions:{ flag:"chemist_freed", flagNot:"chemist_echo", dealsSinceGte:5 },
+    lines:[
+      { text:"A postcard reaches the gallery: a pelican, a pier, and eight sentences of extremely careful handwriting that never once says a name. Folded into the envelope it arrived in, four thousand dollars in American twenties.", portrait:"amused" },
+      { text:"“He teaches chemistry at a secondary school now,” Maria reports, reading it twice. “He says the students are terrible and the acetone is excellent.” She looks up. “You understand that this never happens. In eleven years I have never once watched a man get OUT.”", portrait:"knowing" },
+    ],
+    choices:[
+      { text:"Frame the money with the postcard", reaction:"She hangs it between two paintings nobody will ever buy — real money behind glass, priced at forty thousand dollars. “It’s the only honest object in this gallery,” she says, “so obviously it is the one thing I will never sell.”", effects:{ cred:2, "npc.maria.trust":2, flags:["chemist_echo","postcard_framed"], montage:"A postcard from Puntarenas, framed with four thousand dollars behind glass." } },
+      { text:"Take the four grand", reaction:"“Of course you do.” She hands it over without judgment, which from Maria is its own particular kind of judgment. The postcard she keeps. It goes in a drawer with the two other things she has ever kept.", effects:{ cashDelta:4000, flags:["chemist_echo"], montage:"Took the chemist's four thousand dollars. Maria kept the postcard." } },
+    ] },
+
+  chemist_letters: { speaker:"colombiano", portrait:"pleased", priority:7,
+    conditions:{ flag:"chemist_delivered", flagNot:"chemist_echo", dealsSinceGte:5 },
+    lines:[
+      { text:"El Colombiano takes you to dinner at a place with no menu and orders in Spanish without looking up, exactly as he did the first time. “A toast, friend. To loyalty — rarer than product, and priced about the same.”", portrait:"pleased" },
+      { text:"Halfway through the fish he says, conversationally, “Aurelio’s sister writes to the consulate every week. Every WEEK. The letters are very well constructed. She was a teacher also.” He eats. “Some families produce nothing but careful people.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Say nothing. Finish the fish.", reaction:"You finish the fish. It is excellent. You will eat this exact meal again in your sleep for a long time, and in the dream you never say anything either, and the not-saying is the part that wakes you up at four in the morning.", effects:{ hpDelta:-6, "npc.colombiano.trust":1, flags:["chemist_echo"], montage:"Finished the fish. Said nothing at all about the letters." } },
+      { text:"Send the sister money. Anonymously.", reaction:"Two thousand dollars reaches Puntarenas with no name attached, which is exactly as much help as it sounds like. El Colombiano never mentions it and never will — but a month later he seats you facing the door, which in his language is either respect or a test.", effects:{ cashDelta:-2000, cred:2, "npc.colombiano.trust":-1, flags:["chemist_echo","sent_the_sister_money"], montage:"Sent the chemist's sister money. No name on it." } },
+    ] },
+
+  col_informant_found: { speaker:"colombiano", portrait:"cold", priority:13,
+    conditions:{ flag:"became_informant", "npc.colombiano.met":{eq:true}, flagNot:"informant_exposed", dealsSinceGte:4 },
+    lines:[
+      { text:"The restaurant is empty again, and this time nobody has poured anything. El Colombiano has the Herald folded to page four and a fountain pen, and he is doing the crossword in ink, which tells you everything about his relationship with certainty.", portrait:"neutral" },
+      { text:"“Three of my people were arrested in one week. Different corners, different crews, one COMMON element.” He fills in seven across without pausing. “In Medellín we would already be finished talking. Here I am a guest in a country with excellent forensics, so I talk first. Enjoy the innovation.”", portrait:"cold" },
+    ],
+    choices:[
+      { text:"Buy the conversation — $30,000", reaction:"The money crosses the table under the newspaper, which is either tradition or theater. He does not count it. “This purchases the CONVERSATION, friend. Not forgiveness. Forgiveness is not a product I stock.” He returns to the crossword. You are permitted to leave, which is not nothing.", effects:{ cashDelta:-30000, "npc.colombiano.trust":1, flags:["informant_exposed","bought_the_conversation"], montage:"Paid $30,000 under a newspaper to be allowed to walk out of a restaurant." } },
+      { text:"Prove it was me", reaction:"“Prove.” He tastes the word and finds it foreign. “That is a courtroom verb, friend. You have been spending time in courtrooms — it shows.” He caps the pen. You are followed home by a car that makes no effort whatsoever to be discreet, and the following continues for eleven days.", effects:{ hpDelta:-10, heatDelta:10, "npc.colombiano.trust":-4, flags:["informant_exposed","col_hunting"], montage:"Told the cartel to prove it. A car followed you home for eleven days." } },
+    ] },
+
+  col_war_corner: { speaker:"colombiano", portrait:"cold", priority:11,
+    conditions:{ flag:"col_war", credGte:30, flagNot:"col_war_corner", dealsSinceGte:3 },
+    lines:[
+      { text:"They took the corner on 62nd at four in the morning with nine men and no shooting, which is worse, because it means they were confident. Two of your people are at Jackson Memorial. One of them will be fine. One of them will walk with a cane at twenty-three.", portrait:"cold" },
+      { text:"El Colombiano telephones you himself, which is its own species of insult. “I want to be very clear that this was BUSINESS,” he says. “The boy with the leg was not instructed. My man exceeded his brief. He has been corrected.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Take it back tonight", reaction:"You take it back with fourteen men and a great deal of noise, and by dawn the corner is yours and everyone in three districts has heard about it. Vice hears about it too, obviously. The Herald runs it on page seven under a photograph of an overturned shopping cart.", effects:{ cred:8, heatDelta:9, "npc.colombiano.trust":-2, "npc.ramirez.evidence":2, flags:["col_war_corner","took_it_back"], montage:"Took the corner on 62nd back before dawn. Page seven." } },
+      { text:"Send $5,000 to the kid's family instead", reaction:"The money goes to a house on 58th with no name attached and a note that reads only WALK GOOD. You never take the corner back. Something else happens instead: for a long while, people in Overtown start telling you things they do not tell anybody.", effects:{ cashDelta:-5000, cred:4, flags:["col_war_corner","walk_good"], montage:"Sent $5,000 to the kid's family. Never took the corner back." } },
+    ] },
+
+  col_joint_venture: { speaker:"colombiano", portrait:"pleased", priority:9,
+    conditions:{ flag:"col_peace", totalProfitGte:110000, flagNot:"col_venture", dealsSinceGte:4 },
+    lines:[
+      { text:"“Peace is expensive,” El Colombiano says, in a marina office that smells like varnish and money, “which is why so few men can afford it. Fortunately you and I are not men. We are a JOINT VENTURE.”", portrait:"pleased" },
+      { text:"“A go-fast comes into Ocean Reef on Thursday. Twenty units at my cost — which nobody outside my family has ever been offered, and which you will not mention at parties. Twenty-two thousand dollars, and the two of us stop paying a war tax that we were both pretending was strategy.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Buy in — $22,000", reaction:"The boat comes in at 3 AM with its lights off and its motors trimmed, and twenty units go into your trunk while a man in a polo shirt talks about tarpon fishing the entire time. “You see?” El Colombiano says. “Business. It is so much more restful than the other thing.”", effects:{ cashDelta:-22000, invGift:{idx:5,qty:20}, "npc.colombiano.trust":2, flags:["col_venture"], montage:"Bought into the Ocean Reef go-fast. Twenty units at cartel cost." } },
+      { text:"I buy my own product", reaction:"“Of course.” He is not offended; he is CATALOGUING. “Independence. It is the most expensive thing in this city, and every man here buys it retail.” The peace holds. It holds slightly less well than it did an hour ago.", effects:{ cred:2, "npc.colombiano.trust":-1, flags:["col_venture","stayed_independent"], montage:"Turned down the cartel's joint venture. Kept your own supply lines." } },
+    ] },
+
+  col_departures: { speaker:"colombiano", portrait:"neutral", priority:12,
+    conditions:{ flag:"col_broken", flagNot:"col_after", dealsSinceGte:2 },
+    lines:[
+      { text:"You find him in the departures hall at MIA at six in the morning, alone, with one suitcase and a boarding pass for Barranquilla via a connection nobody sane would book. The cream suit is the same suit. It has been the same suit for three weeks.", portrait:"neutral" },
+      { text:"“They have decided that I am unlucky,” he says, watching the board flip. “In my organization there is no crime called losing. There is only a condition called unlucky, and it is treated identically. So: home, a farm, and a telephone that does not ring.”", portrait:"cold" },
+      { text:"“You will have all of it now. The corners, the routes, the men who called me señor.” He almost smiles. “And in four years, or eight, a young man will stand in this hall and watch YOUR board flip. I want you to know that I will not enjoy it. I will simply have expected it.”", portrait:"neutral" },
+    ],
+    choices:[
+      { text:"Safe flight, señor", reaction:"He shakes your hand with both of his — exactly the way a chemist once did — and walks to a gate at the far end of the terminal without looking back. The suitcase is very light. Whatever he built in this city, he is not carrying any of it home.", effects:{ cred:5, flags:["col_after","col_exile_witnessed"], montage:"Watched El Colombiano leave MIA with one very light suitcase." } },
+      { text:"You should have taken the peace", reaction:"“Yes,” he agrees immediately, which robs you of everything. “That is the correct analysis. I have had eleven days to arrive at it and you have had four seconds.” He picks up the suitcase. “That is why you win, friend. You are FASTER at being right. It is not the same thing as being right.”", effects:{ cred:3, flags:["col_after","col_exile_witnessed"], montage:"Told a beaten man he should have taken the peace. He agreed instantly." } },
+    ] },
+
   colombiano_intro: { speaker:"colombiano", portrait:"neutral", priority:15,
     conditions:{ "npc.colombiano.met":{eq:false}, orGroup:{ totalProfitGte:50000, credGte:40, turfGte:3 } },
     lines:[
@@ -612,6 +1609,26 @@ const meetsConditions=(conds,s)=>{
     else if(k==="soldCrack"){ if(!s.storyFlags?.sold_crack) return false; }
     else if(k==="flag"){ if(!s.storyFlags?.[v]) return false; }
     else if(k==="flagNot"){ if(s.storyFlags?.[v]) return false; }
+    else if(k==="flagAll"){ for(const f of v){ if(!s.storyFlags?.[f]) return false; } }
+    else if(k==="flagAny"){ if(!v.some(f=>s.storyFlags?.[f])) return false; }
+    else if(k==="flagNone"){ if(v.some(f=>s.storyFlags?.[f])) return false; }
+    else if(k==="moveGte"){ if((s.move||0)<v) return false; }
+    else if(k==="cashLte"){ if((s.cash||0)>v) return false; }
+    else if(k==="liquidLte"){ if((s.cash||0)+(s.bank||0)+(s.cleanCash||0)>v) return false; }
+    else if(k==="fedHeatLte"){ if((s.fedHeat||0)>v) return false; }
+    else if(k==="credLte"){ if((s.cred||0)>v) return false; }
+    else if(k==="hpLte"){ if((s.hp||0)>v) return false; }
+    else if(k==="hpGte"){ if((s.hp||0)<v) return false; }
+    else if(k==="evidenceLte"){ if(ev>v) return false; }
+    else if(k==="eraGte"){ if((s.currentEra||0)<v) return false; }
+    else if(k==="eraLte"){ if((s.currentEra||0)>v) return false; }
+    else if(k==="bustsGte"){ if((s.totalBusts||0)<v) return false; }
+    else if(k==="turfLte"){ if((s.turf||[]).filter(t=>t>0).length>v) return false; }
+    else if(k==="invGte"){ if((s.inv||[]).reduce((a,b)=>a+b,0)<v) return false; }
+    else if(k==="locIn"){ if(!v.includes(s.loc)) return false; }
+    else if(k==="nightOnly"){ if((((s.move||0)%2)===1)!==!!v) return false; }
+    else if(k==="hasGun"){ if(!!s.gun!==!!v) return false; }
+    else if(k==="hasLifestyle"){ if(!(s.lifestyle||[]).includes(v)) return false; }
     else if(k==="orGroup"){
       let ok=false;
       if(v.totalProfitGte!=null && (s.totalProfit||0)>=v.totalProfitGte) ok=true;
@@ -645,6 +1662,15 @@ const applyChoiceEffects=(s,eff)=>{
     else if(k==="launderPct"){ const amt=Math.floor(ns.cash*v.pct); const fee=Math.floor(amt*v.fee);
       ns.cash-=amt; ns.cleanCash=(ns.cleanCash||0)+amt-fee; }
     else if(k==="cleanDelta") ns.cleanCash=(ns.cleanCash||0)+v;
+    else if(k==="hpDelta") ns.hp=CL((ns.hp||0)+v,0,100);
+    else if(k==="bankDelta") ns.bank=Math.max(0,(ns.bank||0)+v);
+    else if(k==="gun") ns.gun=!!v;
+    else if(k==="coatDelta") ns.coatSp=Math.max(20,(ns.coatSp||0)+v);
+    else if(k==="demandBoost"){ ns.demand=ns.demand.map((d,i)=>i===v.idx?Math.max(.4,d*v.mult):d); }
+    else if(k==="invGift"){
+      const room=Math.max(0,(ns.coatSp||0)-ns.inv.reduce((a,b)=>a+b,0)), qty=Math.min(v.qty,room);
+      if(qty>0){ const inv=[...ns.inv], ac=[...ns.avgCost], pre=inv[v.idx];
+        ac[v.idx]=Math.round((ac[v.idx]*pre)/(pre+qty)); inv[v.idx]=pre+qty; ns.inv=inv; ns.avgCost=ac; } }
     else if(k==="cred") ns.cred=CL(ns.cred+v,0,100);
     else if(k==="flags") v.forEach(f=>ns.storyFlags[f]=true);
     else if(k==="montage") ns.montage.push({move:ns.move,text:v});
@@ -702,7 +1728,21 @@ const generateNarrative=s=>{
   if(s.npcState?.cass?.trust>=2) npcLines.push("A Brickell bank closed four accounts the same morning. 'Routine housekeeping,' said a manager with a new tan.");
   if(s.storyFlags?.shark_grudge) npcLines.push("A man at the fish market, asked if he knew the subject, gutted a snapper and said nothing at all.");
   if(s.storyFlags?.cartel_supplier) npcLines.push("Federal sources allege ties to Medellín. Medellín, as always, alleges nothing.");
-  return [opener, `The run lasted ${days} days.`, ...beats.slice(0,2), ...npcLines.slice(0,2)].join(" ");
+  const coda=[], fl=s.storyFlags||{};
+  if(fl.ramirez_debt) coda.push("Det. H. Ramirez filed his retirement papers in the spring. Colleagues recall a cardboard box burning in a shopping cart behind a closed department store, and no explanation ever offered.");
+  else if(fl.ramirez_vendetta) coda.push("A detective who had not taken a vacation since 1981 took two weeks. Sources familiar with the resulting file describe it as “unusually personal.”");
+  if(fl.elena_published) coda.push("A student photograph titled FRAME NINETEEN hangs in a permanent collection four blocks from the State Attorney’s office. The subject has never been identified.");
+  if(fl.chemist_freed) coda.push("A secondary-school chemistry teacher in Puntarenas, reached by telephone, said he had never been to Florida, and then hung up very politely.");
+  else if(fl.chemist_delivered) coda.push("A warehouse in Doral changed hands quietly last quarter. So, apparently, did a chemist.");
+  if(fl.shark_loyal_final) coda.push("At a fish market on the river, an old man still guts snapper at 6 AM and still owns his own name.");
+  else if(fl.shark_heir) coda.push("A car wash in Tampa reopened under new ownership. Its books, associates note admiringly, are accurate to the gram.");
+  if(fl.cesar_held) coda.push("César Santos, released without charge after nine hours of silence, sells boats in Gainesville now and lies cheerfully about why he left.");
+  else if(fl.cesar_burned) coda.push("A man deported to Panama gave a statement on his way out. It ran four pages and it named exactly one person.");
+  if(fl.walk_good) coda.push("A family on 58th Street received five thousand dollars and a note reading only WALK GOOD. They kept the note. They framed it.");
+  if(fl.no_more_crack) coda.push("Corners in Overtown that had one steady supplier in the spring had none at all by the end of summer. Nobody has ever explained it.");
+  if(fl.proffer_signed) coda.push("Federal filings identify a cooperating witness by number only. The number appears eleven times.");
+  if(fl.postcard_framed) coda.push("A Coral Gables gallery lists a framed postcard at forty thousand dollars. It is not for sale, which the owner considers the entire point.");
+  return [opener, `The run lasted ${days} days.`, ...beats.slice(0,2), ...npcLines.slice(0,2), ...coda.slice(0,2)].join(" ");
 };
 const ENDING_HEADLINES={
   bust:["KINGPIN FALLS IN DAWN RAID","VICE NETS BIGGEST FISH YET"],
@@ -728,6 +1768,10 @@ const ACHIEVEMENTS=[
   { id:"storyteller", icon:"\ud83d\udcd6", name:"Storyteller",      desc:"Live 8+ scenes in one run",           test:(g,nw)=>Object.keys(g.storySeen||{}).length>=8 },
   { id:"hurricane",   icon:"\ud83c\udf00", name:"Eye of the Storm", desc:"Trade through the hurricane",         test:(g,nw)=>!!g.storyFlags?.hurricane_done },
   { id:"conquistador",icon:"\u2694\ufe0f", name:"Conquistador",     desc:"Break El Colombiano's empire",        test:(g,nw)=>!!g.storyFlags?.col_broken },
+  { id:"frame_19",   icon:"📷", name:"Frame Nineteen",   desc:"Make an honest cop burn his own file", test:(g,nw)=>!!g.storyFlags?.ramirez_debt },
+  { id:"succession", icon:"🐟", name:"The Succession",   desc:"Keep Tiburon's name on Tiburon's book", test:(g,nw)=>!!g.storyFlags?.shark_loyal_final },
+  { id:"ninety_six", icon:"⚗️", name:"Ninety-Six",       desc:"Put the cartel's chemist on a boat",    test:(g,nw)=>!!g.storyFlags?.chemist_freed },
+  { id:"keeper",     icon:"🚌", name:"Brother's Keeper", desc:"Get Cesar Santos out of the room",      test:(g,nw)=>!!(g.storyFlags?.cesar_held||g.storyFlags?.cesar_exiled) },
 ];
 const DEFAULT_META={ rep:0, totalRep:0, runs:0, bestNW:0, wins:0, maxHeatBeaten:-1, upgrades:{}, sound:true, lastDaily:null, ach:{}, endings:{}, topRuns:[], biggestDeal:0 };
 let MEM_META=null;
@@ -818,6 +1862,10 @@ const createInitialState=(heatLevel=0,playbook=null,daily=null,upgrades={})=>{
     pagerDeal:null, evtMsg:null, activeStorylet:null,
     hudSeen:{ debt:false, hp:false, heat:false, cred:false, era:false },
     coach:{}, ending:null,
+    locDemand:initLocDemand(), patrols:initPatrols(), informants:initInformants(),
+    districtSales:LOCS.map(()=>0), shocks:[], newsWire:[], forfeitFuse:0,
+    rival:initRival(), rivalFocus:RIVAL_NAMES.slice(0,3).map(()=>R(0,DRUG_COUNT-1)),
+    enfLoyalty:LOCS.map(()=>100), launderMove:-1, launderUse:{}, launderedTotal:0,
   };
   s=applyUpgrades(s,upgrades);
   s=applyPlaybook(s,playbook);
@@ -848,6 +1896,7 @@ function processTravel(s,destLoc){
   const newMom=evolveMomentum(s.momentum);
   const newBase=evolveBasePrices(s.basePrices,newMom,evtDrug,evtType,evtMulti);
   const np=getStreetPrices(newBase,destLoc,era.demandMod,s.demand,s.dailyPriceMulti||1);
+  applyMarketPrices(s,destLoc,np);
   const newHist=s.hist.map((h,i)=>[...h.slice(-9),np[i]]);
 
   // Heat decay & floor
@@ -862,7 +1911,7 @@ function processTravel(s,destLoc){
   // Police roll
   const hl=HEAT_LADDER[s.heatLevel||0]||HEAT_LADDER[0];
   const wealthMod=s.cash>=500000?1.6:s.cash>=250000?1.4:s.cash>=100000?1.2:1;
-  const policeEff=LOCS[destLoc].heat*0.5*era.copsMod*hl.copsMod*(s.playbookCopsMod||1)*(s.dailyCopsMod||1)*(1+(s.upgradeHeatMod||0))*(1+nh/300)*(isNight?1.2:1)*wealthMod;
+  const policeEff=LOCS[destLoc].heat*0.5*era.copsMod*hl.copsMod*(s.playbookCopsMod||1)*(s.dailyCopsMod||1)*(1+(s.upgradeHeatMod||0))*(1+nh/300)*(isNight?1.2:1)*wealthMod*districtRisk(s,destLoc);
   if(Math.random()<policeEff && usedSp>0){
     effects.push({type:"SFX",name:"police"},{type:"SCREEN",screen:"police"});
     if(!s.hudSeen.heat) effects.push({type:"PING",stat:"heat"});
@@ -884,8 +1933,8 @@ function processTravel(s,destLoc){
   if(nm%4===0&&bank>0) bank=Math.floor(bank*1.03);
 
   // Empire income
-  const turfIncome=s.turf.reduce((sum,lv)=>sum+TURF_LEVELS[lv].income,0);
-  const enfUpkeep=s.enforcers.reduce((sum,e)=>sum+e*ENFORCER_UPKEEP,0);
+  const turfIncome=empireIncome(s);
+  const enfUpkeep=crewUpkeep(s);
   const empNet=turfIncome-enfUpkeep;
   cash+=empNet;
   if(empNet>0) effects.push({type:"SPAWN",text:`+${FM(empNet)} turf`,color:C.gold,y:.55});
@@ -1174,14 +2223,21 @@ function processTravel(s,destLoc){
     dealsSinceStory:(s.dealsSinceStory||0),
     rivals:s.rivals.map(v=>({...v,loc:Math.random()<.3?R(0,5):v.loc})),
   };
+  // ── LIVING CITY — district demand, shocks, patrols, informants, crew, rival ──
+  const world=worldTick(s,out,{turfWar,dealEvent,randEnc});
+  Object.assign(out,world.patch);
+  for(const we of world.effects) effects.push(we);
+  if(world.evtMsg) out.evtMsg=world.evtMsg;
+  const worldTurfWar=world.turfWar, worldEvent=world.worldEvent;
+
   // Storylet selection happens AFTER other modals resolve, only if nothing big fired
-  const blocked=effects.some(e=>e.type==="SCREEN"||e.type==="GAME_OVER")||newspaper||randEnc||turfWar||dealEvent||eraShift;
+  const blocked=effects.some(e=>e.type==="SCREEN"||e.type==="GAME_OVER")||newspaper||randEnc||turfWar||worldTurfWar||worldEvent||dealEvent||eraShift;
   let storylet=null;
   if(!blocked){
     storylet=selectStorylet(out);
     if(storylet){ out.storySeen={...out.storySeen,[storylet.id]:true}; out.activeStorylet=storylet; out.dealsSinceStory=0; }
   }
-  return { state:out, effects, newspaper, randEnc, turfWar, dealEvent, eraShift };
+  return { state:out, effects, newspaper, randEnc, turfWar:turfWar||worldTurfWar, dealEvent, eraShift, worldEvent };
 }
 
 function processBuy(s,drugIdx,amt){
@@ -1204,7 +2260,7 @@ function processBuy(s,drugIdx,amt){
   inv[drugIdx]+=amt;
   const supplierHistory={...s.supplierHistory,[s.loc]:((s.supplierHistory||{})[s.loc]||0)+1};
   const demand=s.demand.map((d,i)=>i===drugIdx?Math.max(.4,d*.97):d);
-  return { state:{...s, cash:s.cash-cost, inv, avgCost, purity, supplierHistory, demand,
+  return { state:{...s, ...tradeMarketPatch(s,drugIdx,amt,"buy"), cash:s.cash-cost, inv, avgCost, purity, supplierHistory, demand,
     totalDeals:(s.totalDeals||0)+1, dealsSinceStory:(s.dealsSinceStory||0)+1,
     fedHeat:CL(s.fedHeat+(amt>20?2:amt>8?1:0),0,100) }, ok:true, effects };
 }
@@ -1259,7 +2315,7 @@ function processSell(s,drugIdx,amt){
   }
   const hudSeen={...s.hudSeen};
   if(!hudSeen.cred&&CL(s.cred+credGain,0,100)>=10){ hudSeen.cred=true; effects.push({type:"PING",stat:"cred"}); }
-  return { state:{...s, cash:s.cash+revenue, inv, demand, pagerDeal, montage, storyFlags, hudSeen, streak, npcState,
+  return { state:{...s, ...tradeMarketPatch(s,drugIdx,amt,"sell"), cash:s.cash+revenue, inv, demand, pagerDeal, montage, storyFlags, hudSeen, streak, npcState,
     cred:CL(s.cred+credGain,0,100), totalProfit:(s.totalProfit||0)+Math.max(0,profit),
     totalDeals:(s.totalDeals||0)+1, dealsSinceStory:(s.dealsSinceStory||0)+1,
     biggestDeal:Math.max(s.biggestDeal||0,revenue),
@@ -3441,7 +4497,8 @@ const TimingMini=({cfg,sound,onDone})=>{
       <div style={{position:"absolute",top:6,bottom:6,left:`${zone[round]}%`,width:2,marginLeft:-1,background:cfg.color,boxShadow:`0 0 8px ${cfg.color}`}}/>
       <div ref={curRef} key={round} style={{position:"absolute",top:4,bottom:4,width:14,borderRadius:4,
         background:"#fff",boxShadow:"0 0 12px #fff",
-        animation:`sweepX ${1.15/cfg.speed}s linear infinite alternate`,
+        animationName:"sweepX",animationDuration:`${1.15/cfg.speed}s`,animationTimingFunction:"linear",
+        animationIterationCount:"infinite",animationDirection:"alternate",
         animationPlayState:locked?"paused":"running"}}/>
       {locked&&<Verdict score={locked.sc}/>}
     </div>
@@ -3948,6 +5005,26 @@ const EscapeScreen=({g,onAttempt,onBack})=>{
       desc:"Zurich via Panama via a funeral home in Hialeah. You become a wire transfer, then a rumor.",
       ok:(g.npcState.cass&&g.npcState.cass.trust>=2)&&total>=35000&&!g.storyFlags.cass_burned,
       req:g.storyFlags.cass_burned?"Cass remembers things wrong about you now.":"Cass trust 2+ and $35,000", ending:"escape" },
+    { id:"photograph", name:"THE HEAD START", icon:"📷", cost:10000,
+      desc:"Ramirez burned two hundred and six pages behind a dead Zayre and told you to be gone. Gone means gone.",
+      ok:!!g.storyFlags.ramirez_debt&&total>=10000,
+      req:g.storyFlags.ramirez_vendetta?"He spent his vacation on you. There is no head start.":"Needs the detective's debt and $10,000", ending:"escape" },
+    { id:"shrimp_boat", name:"THE ISLAMORADA BOAT", icon:"🦈", cost:15000,
+      desc:"A shrimp boat with a bad radio and a good captain. Eleven hundred islands, forty police officers, and Thursday.",
+      ok:!!g.storyFlags.shark_boat&&(g.npcState.tiburon&&(g.npcState.tiburon.trust||0)>=2)&&total>=15000,
+      req:"Needs Tiburon's boat, trust 2+ and $15,000", ending:"escape" },
+    { id:"second_seat", name:"THE SECOND SEAT", icon:"💺", cost:20000,
+      desc:"Same strip near Homestead, worse plane, no discount. She wrote it on a clipboard, which is more binding than a contract.",
+      ok:!!g.storyFlags.seat_rebought&&total>=20000,
+      req:"Needs the seat you bought back and $20,000", ending:"escape" },
+    { id:"medellin", name:"THE INVITATION", icon:"✈️", cost:30000,
+      desc:"Not an escape. A TRANSFER. A farm above the valley, a telephone that rings when he wants it to, and no return leg.",
+      ok:!!g.storyFlags.cartel_supplier&&(g.npcState.colombiano&&(g.npcState.colombiano.trust||0)>=4)&&total>=30000&&!g.storyFlags.became_informant,
+      req:g.storyFlags.became_informant?"You talked to the government. There is no invitation.":"Needs cartel supply, standing 4+ and $30,000", ending:"escape" },
+    { id:"quiet_crown", name:"THE QUIET CROWN", icon:"🃏", cost:0,
+      desc:"No rooftop, no press. The rival left through departures, the honest cop burned his own file, and nobody announced anything.",
+      ok:!!g.storyFlags.col_exile_witnessed&&!!g.storyFlags.ramirez_debt&&g.cred>=60&&(g.totalProfit||0)>=250000&&turfCt>=3,
+      req:"Cartel exiled, detective's debt, cred 60+, $250K, 3 districts", ending:"kingpin" },
     { id:"kingpin", name:"CLAIM THE CITY", icon:"👑", cost:0,
       desc:"Stop running. Make Miami yours. Forever has a price — paid in advance.",
       ok:g.cred>=80&&(g.totalProfit||0)>=500000&&turfCt>=4, req:"Cred 80+, $500K profit, 4 districts", ending:"kingpin" },
@@ -3975,6 +5052,22 @@ const EscapeScreen=({g,onAttempt,onBack})=>{
 };
 
 const FINALES={
+  photograph:{ who:"ramirez", mood:"tired", title:"THE HEAD START", color:C.blue,
+    lines:["He does not come to see you off, because that would be a thing a friend does and this is not that. He sends a message through a barber on Calle Ocho: nine words, no signature. NORTHBOUND LANES ARE CLEAR UNTIL SIX. GO NOW.",
+      "You take US 1 out of Dade County at 4:40 in the morning with the windows down, past the Krome Avenue turnoff, past the last streetlight, past the point where the radio stations start belonging to somebody else.",
+      "In a parking lot behind a closed department store, ash from two hundred and six pages is still in a shopping cart, and a man who makes thirty-eight thousand dollars a year is at home, awake, deciding for the rest of his life whether he did the right thing."] },
+  shrimp_boat:{ who:"tiburon", mood:"neutral", title:"ELEVEN HUNDRED ISLANDS", color:C.green,
+    lines:["The boat smells like diesel and forty years of ice, and the captain is somebody’s cousin, and Tiburón stands on the dock in a shirt with parrots on it, waving with a fillet knife like a man seeing off a cruise.",
+      "“Remember the geography, amigo!” he shouts across the water. “There is no smuggler! There is only a fishing guide, and there is THURSDAY!” The gold tooth catches the last of the dock light and then the dock light is gone.",
+      "Somewhere south of Marathon the water turns a color that does not exist in Miami. Nobody files a report, because nobody has anything to report: a boat went out, a boat came back, and the manifest said ice."] },
+  second_seat:{ who:"maria", mood:"knowing", title:"THE SECOND CHARTER", color:C.flamingo,
+    lines:["The plane is worse this time — a Cessna with one working landing light and a pilot who apologizes for the seat belt. Maria is already on board, doing inventory on a clipboard at five in the morning, because she is incapable of waiting like a normal person.",
+      "“You bought this seat twice,” she says, without looking up. “That is either the most expensive lesson in Dade County or the only one that ever took. I have decided not to tell you which.”",
+      "At altitude she finally puts the clipboard down and looks out the window at the pink and blue and gold of a city that is no longer a factor in either of your lives. “God,” she says. “It really is beautiful from the outside.”"] },
+  medellin:{ who:"colombiano", mood:"pleased", title:"THE INVITATION", color:C.orange,
+    lines:["There is no forger, no charter, no numbered account. There is a first-class ticket in your own name and a customs officer in Rionegro who takes your passport, looks at nothing, and says “Welcome home, señor,” in a country you have never been to.",
+      "“You misunderstand what has happened,” El Colombiano says on the drive up into the valley, where the air gets thin and green. “You did not escape Miami. Miami was a POSITION, and we have moved you off it. There is a difference, and one day it will matter to you.”",
+      "The farm has a telephone that rings only when he decides it should. Some nights the fog comes up the mountain and covers everything, and you stand on the terrace with a drink you did not pour, a wealthy man in exile, listening to a phone that is not ringing yet."] },
   maria:{ who:"maria", mood:"flirty", title:"THE LAST FLIGHT OUT", color:C.flamingo,
     lines:["The airstrip near Homestead is a scar of cracked tarmac between two tomato fields. The plane is older than you and twice as tired. Maria is leaning against it like it owes her money.",
       "\u201cYou actually came,\u201d she says, and for one second the armor slips \u2014 then it\u2019s back, polished. \u201cMost of them don\u2019t, you know. Most of them love the table too much to leave it.\u201d",
@@ -4322,6 +5415,7 @@ export default function Cocaine80s(){
       if(res.dealEvent) pending={type:"deal",data:res.dealEvent};
       else if(res.randEnc) pending={type:"enc",data:res.randEnc};
       else if(res.turfWar) pending={type:"turf",data:res.turfWar};
+      else if(res.worldEvent) pending={type:"world",data:res.worldEvent};
       else if(res.newspaper) pending={type:"news",data:res.newspaper};
       pendingModal.current=pending;
     },Math.floor(driveMs*.45));
@@ -4364,6 +5458,12 @@ export default function Cocaine80s(){
       return ns;
     });
   };
+  const worldAct=o=>{ const ev=modal.data; setModal(null); if(meta.sound)SFX.click();
+    if(o.id==="assault"){ setMini({kind:"mash",cfg:{title:"🔫 TAKE THE DOCK",
+      desc:"His whole organization is on that pier. Push until something breaks.",
+      rival:CL(Math.round(((g.rival&&g.rival.power)||10)*0.22),4,11),
+      done:sc=>act(resolveWorldEvent,ev,o,sc)}}); return; }
+    act(resolveWorldEvent,ev,o); };
   const encAct=action=>{ const enc=modal.data; setModal(null);
     if(action==="leave"||action==="decline") return;
     if(enc.type==="mugger"&&action==="fight"&&!g.gun){
@@ -4484,6 +5584,7 @@ export default function Cocaine80s(){
           {hud.cred&&<HudChip icon="⭐" label={g.cred} color={C.gold} bar={g.cred}/>}
           {g.streak>=2&&<div style={{...bx,padding:"5px 10px",border:`1px solid ${C.orange}66`,fontFamily:ft,fontSize:11,fontWeight:"bold",color:C.orange,animation:"hudPing .5s ease"}}>🔥×{g.streak}</div>}
           <div ref={bagRef} style={{...bx,padding:"5px 10px",fontFamily:ft,fontSize:11,color:C.dim}}>🎒{used}/{g.coatSp}</div>
+          <HeatPlanChip g={g}/>
         </div>
 
         {/* THE PLAN — act tracker */}
@@ -4526,6 +5627,7 @@ export default function Cocaine80s(){
         {coachKey==="sell_here"&&<CoachMark k="sell_here" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
 
         {tab==="market"&&<div>
+          <MarketWire g={g}/>
           {g.colTurf?.[g.loc]&&!g.storyFlags.col_peace&&<div style={{...bx,marginBottom:8,padding:"7px 10px",border:`1px solid ${C.orange}66`,
             fontFamily:ft,fontSize:10,color:C.orange}}>🇨🇴 HIS BLOCK — his crews undercut you. Sales pay −12% here.</div>}
           {DRUGS.map((d,i)=>{
@@ -4571,6 +5673,7 @@ export default function Cocaine80s(){
 
         {tab==="travel"&&<div>
           <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:C.dim,marginBottom:8}}>◆ EVERY TRIP MOVES THE MARKET — AND THE HEAT</div>
+          <DistrictBoard g={g}/>
           <div style={{fontFamily:ft,fontSize:8.5,color:C.dim,marginBottom:8}}>
             ST/MID/WT = street, mid-tier, weight ◆ <span style={{color:C.green}}>▼ buys cheap</span> ◆ <span style={{color:C.gold}}>▲ sells high</span> ◆ <span style={{color:C.pink}}>⚔ rival spotted</span></div>
           {LOCS.map((l,i)=>(
@@ -4599,7 +5702,7 @@ export default function Cocaine80s(){
         </div>}
 
         {tab==="bank"&&<BankTab g={g} act={act} meta={meta} onEscape={()=>setScreen("escape")} markCoach={markCoach}/>}
-        {tab==="empire"&&<EmpireTab g={g} act={act}/>}
+        {tab==="empire"&&<EmpireTab g={g} act={act} setMini={setMini}/>}
         {tab==="contacts"&&<ContactsTab g={g}/>}
         {tab==="life"&&<LifeTab g={g} act={act}/>}
       </div>
@@ -4678,6 +5781,7 @@ export default function Cocaine80s(){
       {modal&&modal.type==="enc"&&<EncounterModal enc={modal.data} onAct={encAct}/>}
       {modal&&modal.type==="turf"&&<TurfWarModal war={modal.data} g={g} onAct={turfAct}/>}
       {modal&&modal.type==="deal"&&<DealStepModal deal={modal.data} g={g} onAct={dealAct}/>}
+      {modal&&modal.type==="world"&&<WorldEventModal ev={modal.data} g={g} onAct={worldAct}/>}
       {mini&&<MiniGame mini={mini} sound={meta.sound}
         onDone={sc=>{ const d=mini.cfg.done; setMini(null); d(sc); }}/>}
       {travelOv&&<TravelOverlay {...travelOv}/>}
@@ -4704,6 +5808,235 @@ export default function Cocaine80s(){
 }
 
 // ── HUD chip ──
+// ═══════════════════════════════════════════════════════════════
+// LIVING CITY — READOUTS. Everything the new systems do is legible
+// before the player commits to a move.
+// ═══════════════════════════════════════════════════════════════
+const wireTone=t=>t==="good"?C.green:t==="bad"?C.pink:C.blue;
+
+const NewsWireList=({wire,n=3})=>{
+  const rows=(wire||[]).slice(0,n);
+  if(!rows.length) return null;
+  return(<div style={{marginTop:6,borderTop:`1px solid ${C.border}`,paddingTop:5}}>
+    {rows.map((w,i)=><div key={i} style={{fontFamily:fb,fontSize:10.5,fontStyle:"italic",
+      color:wireTone(w.tone),opacity:1-i*0.22,marginBottom:2,lineHeight:1.35}}>{w.icon} {w.text}</div>)}
+  </div>);
+};
+
+// ── STREET INTEL — sits above the market list ──
+const MarketWire=({g})=>{
+  const loc=g.loc;
+  const ld=(g.locDemand||[])[loc]||DRUGS.map(()=>1);
+  const pat=(g.patrols||[])[loc]||0, inf=(g.informants||[])[loc]||0;
+  const live=(g.shocks||[]).filter(k=>!k.pending&&(k.loc<0||k.loc===loc));
+  const soon=(g.shocks||[]).filter(k=>k.pending);
+  const fld=g.rival&&g.rival.flood;
+  const flood=(fld&&fld.loc===loc&&g.move<fld.until)?fld:null;
+  const ranked=ld.map((v,i)=>({i,v}));
+  const hot=ranked.filter(x=>x.v>=1.08).sort((a,b)=>b.v-a.v).slice(0,3);
+  const cold=ranked.filter(x=>x.v<=0.9).sort((a,b)=>a.v-b.v).slice(0,3);
+  const vol=(g.districtSales||[])[loc]||0;
+  const patLabel=pat>=4?"SATURATION":pat>=2.5?"HEAVY":"NORMAL";
+  const patColor=pat>=4?"#FF1733":pat>=2.5?C.orange:C.dim;
+  return(
+  <div style={{...bx,marginBottom:8,padding:"8px 10px",border:`1px solid ${C.blue}33`}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+      <span style={{fontFamily:ft,fontSize:8.5,letterSpacing:2,color:C.blue}}>
+        ◆ STREET INTEL — {LOCS[loc].name.toUpperCase()}</span>
+      <span style={{fontFamily:ft,fontSize:9,color:patColor}}>
+        {"🚔".repeat(CL(Math.round(pat),1,5))} {patLabel}</span>
+    </div>
+    {inf>=1&&<div style={{fontFamily:ft,fontSize:9.5,color:inf>=2.5?"#FF1733":C.orange,marginBottom:4}}>
+      🐀 INFORMANT WORKING THIS DISTRICT ({inf.toFixed(1)}/5) — settle it in EMPIRE, or trade elsewhere
+    </div>}
+    {flood&&<div style={{fontFamily:ft,fontSize:9.5,color:C.orange,marginBottom:4}}>
+      🇨🇴 His crews are dumping {DRUGS[flood.drug].name} here — prices held down {Math.max(1,flood.until-g.move)} more move(s)
+    </div>}
+    {live.map((k,i)=><div key={"lv"+i} style={{fontFamily:ft,fontSize:9.5,marginBottom:3,
+      color:k.kind==="spike"?C.green:C.pink}}>
+      {k.icon} {k.kind==="spike"?"SPIKE":"CRASH"} ×{k.mult.toFixed(2)} on {DRUGS[k.drug].name} — {k.moves} move(s) left
+    </div>)}
+    {soon.map((k,i)=><div key={"sn"+i} style={{fontFamily:ft,fontSize:9.5,color:C.gold,marginBottom:3,
+      animation:"hudPulse 1.8s infinite",borderRadius:6,padding:"2px 4px"}}>
+      📻 INCOMING — {k.warn}
+    </div>)}
+    {vol>=12&&<div style={{fontFamily:ft,fontSize:9.5,color:C.dim,marginBottom:4}}>
+      📦 You have moved {Math.round(vol)} units through here lately — the buyers are getting picky</div>}
+    {(hot.length>0||cold.length>0)&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginTop:4}}>
+      {hot.map(x=><span key={"h"+x.i} style={{fontFamily:ft,fontSize:9,color:C.gold,
+        border:`1px solid ${C.gold}44`,borderRadius:8,padding:"2px 6px"}}>
+        {DRUGS[x.i].emoji} HUNGRY ×{x.v.toFixed(2)}</span>)}
+      {cold.map(x=><span key={"c"+x.i} style={{fontFamily:ft,fontSize:9,color:C.dim,
+        border:`1px solid ${C.border}`,borderRadius:8,padding:"2px 6px"}}>
+        {DRUGS[x.i].emoji} SATURATED ×{x.v.toFixed(2)}</span>)}
+    </div>}
+    <NewsWireList wire={g.newsWire} n={3}/>
+  </div>);
+};
+
+// ── DISPATCH BOARD — sits above the travel list ──
+const DistrictBoard=({g})=>(
+  <div style={{...bx,marginBottom:8,padding:"8px 10px",border:`1px solid ${C.blue}33`}}>
+    <div style={{fontFamily:ft,fontSize:8.5,letterSpacing:2,color:C.blue,marginBottom:5}}>
+      ◆ DISPATCH BOARD — READ IT BEFORE YOU DRIVE</div>
+    {LOCS.map((l,i)=>{
+      const dh=heatAt(g,i).next-g.fedHeat;
+      const pat=(g.patrols||[])[i]||0, inf=(g.informants||[])[i]||0;
+      const sk=(g.shocks||[]).filter(k=>!k.pending&&(k.loc<0||k.loc===i));
+      return(<div key={l.name} style={{display:"flex",alignItems:"center",gap:6,fontFamily:ft,fontSize:9,
+        padding:"3px 0",borderBottom:i<LOCS.length-1?`1px solid ${C.border}66`:"none"}}>
+        <span style={{width:15}}>{l.icon}</span>
+        <span style={{flex:1,color:i===g.loc?l.color:C.text}}>
+          {l.name}{g.turf[i]>0?" "+TURF_LEVELS[g.turf[i]].icon:""}</span>
+        <span style={{minWidth:36,textAlign:"right",color:dh<0?C.green:dh>0?C.pink:C.dim}}>
+          🔥{dh>0?"+":""}{dh}</span>
+        <span style={{minWidth:32,textAlign:"right",color:pat>=4?"#FF1733":pat>=2.5?C.orange:C.dim}}>
+          🚔{pat.toFixed(1)}</span>
+        <span style={{minWidth:16,textAlign:"right",color:inf>=1?"#FF1733":C.border}}>{inf>=1?"🐀":"·"}</span>
+        <span style={{minWidth:34,textAlign:"right"}}>
+          {sk.length?sk.map((k,j)=><span key={j} style={{color:k.kind==="spike"?C.green:C.pink}}>
+            {k.kind==="spike"?"▲":"▼"}{DRUGS[k.drug].emoji}</span>):<span style={{color:C.border}}>·</span>}</span>
+        <span style={{minWidth:16,textAlign:"right",color:C.orange}}>{(g.colTurf||[])[i]?"🇨🇴":""}</span>
+      </div>);})}
+    <div style={{fontFamily:ft,fontSize:8,color:C.dim,marginTop:5,lineHeight:1.4}}>
+      🔥 heat change if you go there now ◆ 🚔 patrol pressure ◆ 🐀 informant ◆ ▲▼ live supply shock</div>
+    <NewsWireList wire={g.newsWire} n={2}/>
+  </div>
+);
+
+// ── HEAT FORECAST CHIP — heat becomes a plan, not a surprise ──
+const HeatPlanChip=({g})=>{
+  if(!g.hudSeen.heat) return null;
+  const h=heatAt(g,g.loc), d=h.next-g.fedHeat;
+  const col=d<0?C.green:d>0?C.orange:C.dim;
+  return(<div style={{...bx,padding:"5px 10px",fontFamily:ft,fontSize:11,fontWeight:"bold",
+    border:`1px solid ${col}44`,color:col}}>
+    🔮{d>0?"+":""}{d}<span style={{color:C.dim,fontSize:8,fontWeight:"normal"}}> next{h.floor>0?" ◆ floor "+h.floor:""}</span>
+  </div>);
+};
+
+// ── THE LAUNDROMAT — clean money is safe and illiquid ──
+const LaunderPanel=({g,act})=>{
+  const chans=LAUNDER_CHANNELS.filter(c=>c.need(g));
+  return(<div style={{...bx,marginBottom:8,border:`1px solid ${C.gold}33`}}>
+    <div style={{fontFamily:ft,fontSize:8.5,letterSpacing:2,color:C.gold,marginBottom:4}}>◆ THE LAUNDROMAT</div>
+    <div style={{fontFamily:fb,fontSize:10.5,fontStyle:"italic",color:C.dim,marginBottom:7,lineHeight:1.4}}>
+      Clean money cannot buy product and cannot be seized. Dirty money buys everything and belongs to
+      whoever can prove it is yours. Caps reset every move.</div>
+    {chans.map(ch=>{
+      const room=launderCap(g,ch);
+      const amt=Math.min(g.cash,room);
+      const clean=Math.floor(amt*(1-ch.fee));
+      return(<div key={ch.id} style={{...bx,padding:"7px 9px",marginBottom:6}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:6}}>
+          <span style={{fontFamily:ft,fontSize:11,fontWeight:"bold",color:C.gold}}>{ch.icon} {ch.name}</span>
+          <span style={{fontFamily:ft,fontSize:8.5,color:C.dim,textAlign:"right"}}>
+            {Math.round(ch.fee*100)}% fee ◆ {FM(room)} left{ch.risk?` ◆ ${Math.round(ch.risk*100)}% trail`:""}</span>
+        </div>
+        <div style={{fontFamily:fb,fontSize:10.5,fontStyle:"italic",color:C.dim,margin:"3px 0 6px",lineHeight:1.35}}>{ch.desc}</div>
+        <button style={{...bt(C.gold),width:"100%",padding:"8px",fontSize:11}} disabled={amt<500}
+          onClick={()=>act(processLaunder,ch.id,amt)}>WASH {FM(amt)} ▸ ✨ {FM(clean)}</button>
+      </div>);})}
+  </div>);
+};
+
+// ── RIVAL DOSSIER — the whole-game opponent, visible at all times ──
+const RivalDossier=({g,act})=>{
+  const r=g.rival||initRival();
+  const cols=(g.colTurf||[]).filter(Boolean).length;
+  if(r.broken) return(<div style={{...bx,marginBottom:8,border:`1px solid ${C.gold}55`,
+    fontFamily:ft,fontSize:10.5,color:C.gold}}>
+    👑 EL COLOMBIANO IS FINISHED. The corners answer to you now.</div>);
+  const awake=(g.currentEra||0)>=1||(g.totalProfit||0)>=20000;
+  const mine=strengthOf(g), his=Math.round(r.power);
+  const next=r.power>=22?34:r.power>=13?22:13;
+  return(<div style={{...bx,marginBottom:8,border:`1px solid ${C.orange}55`}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:5}}>
+      <span style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:C.orange}}>◆ THE RIVAL — EL COLOMBIANO</span>
+      <span style={{fontFamily:ft,fontSize:9,color:r.truce>0?C.green:C.dim}}>
+        {r.truce>=900?"PERMANENT PEACE":r.truce>0?`TRUCE ${r.truce}`:awake?"ACTIVE":"DORMANT"}</span>
+    </div>
+    <div style={{display:"flex",gap:8,marginBottom:6}}>
+      <div style={{flex:1}}>
+        <div style={{fontFamily:ft,fontSize:9,color:C.dim,marginBottom:2}}>YOUR STRENGTH {mine}</div>
+        <Bar v={mine} max={Math.max(40,his,mine)} color={mine>=his?C.green:C.blue} h={5}/>
+      </div>
+      <div style={{flex:1}}>
+        <div style={{fontFamily:ft,fontSize:9,color:C.dim,marginBottom:2}}>HIS POWER {his}</div>
+        <Bar v={his} max={Math.max(40,his,mine)} color={C.orange} h={5}/>
+      </div>
+    </div>
+    <div style={{fontFamily:fb,fontSize:11,fontStyle:"italic",color:C.text,marginBottom:5,lineHeight:1.4}}>
+      {r.lastText} {cols>0?`He holds ${cols} district${cols>1?"s":""}.`:""}
+      {r.raids>0?` ${r.raids} raid${r.raids>1?"s":""} on your blocks so far.`:""}
+    </div>
+    <div style={{fontFamily:ft,fontSize:8.5,color:C.dim,marginBottom:6}}>
+      NEXT CONFRONTATION AT POWER {next} ◆ crews, guns, cred and districts all count toward your strength</div>
+    <button style={{...bt(C.pink),width:"100%",padding:"8px",fontSize:11}}
+      disabled={g.cash<6000||g.cred<25||!awake}
+      onClick={()=>act(processSabotage)}>
+      🔥 BURN A STASH HOUSE — $6,000 {g.cred<25?"(NEEDS 25 CRED)":"◆ −3 his power, or he learns your name"}</button>
+  </div>);
+};
+
+// ── STREET OPERATIONS — informants and crew loyalty, per district ──
+const DistrictOps=({g,act})=>{
+  const rows=LOCS.map((l,i)=>({l,i,pat:(g.patrols||[])[i]||0,inf:(g.informants||[])[i]||0,
+    loy:(((g.enfLoyalty||[])[i])??100),enf:(g.enforcers||[])[i]||0}))
+    .filter(r=>r.inf>=1||r.enf>0);
+  if(!rows.length) return null;
+  return(<div style={{...bx,marginBottom:8,border:`1px solid ${C.blue}33`}}>
+    <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:C.blue,marginBottom:6}}>
+      ◆ STREET OPERATIONS — UNPAID CREWS DESERT, SNITCHES COMPOUND</div>
+    {rows.map(r=>{
+      const infCost=Math.floor(700+r.inf*1500+(g.totalProfit||0)*0.005);
+      const bonusCost=r.enf*900;
+      const here=g.loc===r.i;
+      return(<div key={r.l.name} style={{marginBottom:8,paddingBottom:7,borderBottom:`1px solid ${C.border}`}}>
+        <div style={{fontFamily:ft,fontSize:10.5,color:r.l.color,marginBottom:3}}>
+          {r.l.icon} {r.l.name}
+          <span style={{color:C.dim,fontSize:9}}> ◆ 🚔{r.pat.toFixed(1)}{r.inf>=1?` ◆ 🐀${r.inf.toFixed(1)}`:""}
+          {r.enf>0?` ◆ 👊${r.enf} at ${Math.round(r.loy)}%`:""}</span></div>
+        {r.enf>0&&<div style={{marginBottom:5}}>
+          <Bar v={r.loy} color={r.loy>=60?C.green:r.loy>=35?C.orange:C.pink} h={3}/></div>}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {r.inf>=1&&here&&<button style={{...bt(C.blue),flex:1,padding:"7px",fontSize:10}}
+            disabled={g.cash<infCost} onClick={()=>act(processPayInformant,r.i)}>
+            🤐 BUY SILENCE — {FM(infCost)}</button>}
+          {r.inf>=1&&here&&<button style={{...bt(C.pink),flex:1,padding:"7px",fontSize:10}}
+            onClick={()=>act(processLeanOnInformant,r.i)}>👊 LEAN ON HIM</button>}
+          {r.inf>=1&&!here&&<div style={{fontFamily:ft,fontSize:9,color:C.dim,padding:"6px 2px"}}>
+            travel there to deal with the snitch</div>}
+          {r.enf>0&&<button style={{...bt(C.gold),flex:1,padding:"7px",fontSize:10}}
+            disabled={g.cash<bonusCost||r.loy>=98} onClick={()=>act(processCrewBonus,r.i)}>
+            👊 PAY BONUS — {FM(bonusCost)}</button>}
+        </div>
+      </div>);})}
+  </div>);
+};
+
+// ── CONFRONTATION MODAL ──
+const WorldEventModal=({ev,g,onAct})=>(
+  <Modal onClose={()=>{}}>
+    <div style={{...bx,border:`1px solid ${ev.color}88`,padding:16,boxShadow:`0 0 30px ${ev.color}33`}}>
+      <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:ev.color,marginBottom:8}}>◆ {ev.header}</div>
+      <Neon color={ev.color} size={18}>{ev.icon} {ev.title}</Neon>
+      <div style={{fontFamily:fb,fontSize:14.5,fontStyle:"italic",lineHeight:1.55,color:C.text,margin:"10px 0 14px"}}>
+        {ev.text}</div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {ev.opts.map(o=>{
+          const broke=o.cost>0&&g.cash<o.cost;
+          return(<div key={o.id}>
+            <button disabled={broke} style={{...bt(o.color),width:"100%",opacity:broke?.45:1}}
+              onClick={()=>onAct(o)}>{o.label}</button>
+            <div style={{fontFamily:ft,fontSize:8.5,color:broke?C.pink:C.dim,margin:"4px 2px 0",lineHeight:1.35}}>
+              {broke?"NOT ENOUGH CASH — ":""}{o.note}</div>
+          </div>);})}
+      </div>
+    </div>
+  </Modal>
+);
+
 const HudChip=({icon,label,color,bar,pulse})=>(
   <div style={{...bx,padding:"5px 10px",display:"flex",flexDirection:"column",gap:3,border:`1px solid ${color}44`,animation:pulse?"hudPing .6s ease, hudPulse 1.2s .6s infinite":"hudPing .6s ease"}}>
     <div style={{display:"flex",alignItems:"center",gap:5,fontFamily:ft,fontSize:12,fontWeight:"bold",color}}>
@@ -4745,15 +6078,18 @@ const BankTab=({g,act,meta,onEscape,markCoach})=>{
       <Bar v={liquid} max={40000} color={liquid>=40000?C.green:C.blue}/>
       {liquid>=40000&&<div style={{fontFamily:ft,fontSize:9,color:C.green,marginTop:4}}>✓ THE FORGER WILL TAKE YOUR CALL</div>}
     </div>);})()}
+    <LaunderPanel g={g} act={act}/>
     <button style={{...bt(C.blue),width:"100%"}} onClick={onEscape}>🛫 EXPLORE ESCAPE ROUTES</button>
   </div>);
 };
 
 // ── EMPIRE ──
-const EmpireTab=({g,act})=>(
+const EmpireTab=({g,act,setMini})=>(
   <div>
     <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:C.dim,marginBottom:8}}>
       ◆ TURF PAYS EVERY MOVE — ENFORCERS HOLD IT (−{FM(ENFORCER_UPKEEP)}/move each)</div>
+    <RivalDossier g={g} act={act}/>
+    <DistrictOps g={g} act={act}/>
     {(g.colTurf||[]).some(Boolean)&&<div style={{...bx,marginBottom:8,border:`1px solid ${C.orange}55`,fontFamily:ft,fontSize:10,color:C.text}}>
       🇨🇴 <b style={{color:C.orange}}>EL COLOMBIANO</b> holds {(g.colTurf||[]).filter(Boolean).length} district{(g.colTurf||[]).filter(Boolean).length>1?"s":""}.{g.storyFlags.col_peace?" The peace holds — attacking breaks it.":" His crews undercut your sales there −12%."}</div>}
     {LOCS.map((l,i)=>{
