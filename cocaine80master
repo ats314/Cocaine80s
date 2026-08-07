@@ -4153,15 +4153,15 @@ const StoryScene=({story,g,sound,onApply,onClose})=>{
     <div style={{position:"fixed",inset:0,zIndex:60,display:"flex",flexDirection:"column",justifyContent:"flex-end",
       background:"linear-gradient(180deg, rgba(2,8,16,.82) 0%, rgba(2,8,16,.96) 100%)",animation:"fadeIn .3s ease"}}
       onClick={advance}>
-      <div style={{maxWidth:430,width:"100%",margin:"0 auto",padding:14}}>
+      <div style={{maxWidth:430,width:"100%",margin:"0 auto",padding:14,paddingBottom:"calc(14px + env(safe-area-inset-bottom))"}}>
         <div style={{display:"flex",gap:12,alignItems:"flex-end",marginBottom:10,animation:"slideUp .35s ease"}}>
-          <NPCFrame who={story.speaker} mood={mood} w={132}/>
+          <NPCFrame who={story.speaker} mood={mood} w={Math.min(132,Math.round((typeof window!=="undefined"?window.innerWidth:430)*.32))}/>
           <div style={{flex:1,paddingBottom:4}}>
             <div style={{fontFamily:ft,fontSize:9,letterSpacing:2,color:`rgba(${npc.glow},1)`,marginBottom:6}}>
               ◆ {reaction?"OUTCOME":`SCENE ${idx+1}/${lines.length}`}
             </div>
             <div style={{...bx,border:`1px solid rgba(${npc.glow},.4)`,background:"rgba(7,13,24,.95)",
-              boxShadow:`0 0 24px rgba(${npc.glow},.15)`,minHeight:96}}>
+              boxShadow:`0 0 24px rgba(${npc.glow},.15)`,minHeight:96,maxHeight:"34dvh",overflowY:"auto",WebkitOverflowScrolling:"touch"}}>
               <div style={{fontFamily:fb,fontSize:14.5,lineHeight:1.55,color:C.text,fontStyle:"italic"}}>
                 {reaction
                   ?<TypeText key={"rx"} text={reaction.text} sound={sound} onDone={()=>{}} instant={false}/>
@@ -5644,7 +5644,7 @@ export default function Cocaine80s(){
       </div>
 
       {/* ── TAB CONTENT ── */}
-      <div style={{padding:"0 12px",position:"relative"}}>
+      <div style={{padding:"0 12px calc(96px + env(safe-area-inset-bottom))",position:"relative"}}>
         {coachKey==="tap_drug"&&<CoachMark k="tap_drug" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
         {coachKey==="sell_here"&&<CoachMark k="sell_here" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
         {coachKey==="heat_warn"&&<CoachMark k="heat_warn" style={{top:-2,left:"50%",transform:"translateX(-50%)"}}/>}
@@ -5786,7 +5786,7 @@ export default function Cocaine80s(){
         {coachKey==="travel_tip"&&<CoachMark k="travel_tip" style={{top:-30,left:"14%"}}/>}
         {TABS.map(([k,icon])=>{
           const on=unlocks[k];
-          return(<button key={k} disabled={!on} onClick={()=>{ if(tab==="bank"&&k!=="bank")markCoach("debt_tip"); setTab(k); setSelDrug(null); if(k==="travel"){markCoach("travel_tip"); if(coachKey==="heat_warn")markCoach("heat_warn");} if(meta.sound)SFX.click(); }}
+          return(<button key={k} disabled={!on} onClick={()=>{ if(tab==="bank"&&k!=="bank")markCoach("debt_tip"); setTab(k); setSelDrug(null); const rt=document.getElementById("root"); if(rt)rt.scrollTop=0; if(k==="travel"){markCoach("travel_tip"); if(coachKey==="heat_warn")markCoach("heat_warn");} if(meta.sound)SFX.click(); }}
             style={{flex:1,background:"none",border:"none",cursor:on?"pointer":"default",opacity:on?1:.25,padding:"4px 0"}}>
             <div style={{fontSize:17,filter:tab===k?`drop-shadow(0 0 6px ${loc.color})`:"grayscale(.6)"}}>{on?icon:"🔒"}</div>
             <div style={{fontFamily:ft,fontSize:7.5,letterSpacing:1,color:tab===k?loc.color:C.dim,fontWeight:tab===k?"bold":"normal"}}>{k.toUpperCase()}</div>

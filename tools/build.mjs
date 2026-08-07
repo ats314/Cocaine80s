@@ -74,7 +74,7 @@ const html = `<!DOCTYPE html>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   html,body{width:100%;height:100%;overflow:hidden;background:#060E1A}
-  #root{width:100%;height:100%;overflow:hidden;background:#060E1A}
+  #root{width:100%;height:100%;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;background:#060E1A}
 </style>
 </head>
 <body>
